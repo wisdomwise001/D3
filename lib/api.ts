@@ -79,6 +79,11 @@ export function getTournamentImageUrl(tournamentId: number): string {
   return `${baseUrl}api/unique-tournament/${tournamentId}/image`;
 }
 
+export function getPlayerImageUrl(playerId: number): string {
+  const baseUrl = getApiUrl();
+  return `${baseUrl}api/player/${playerId}/image`;
+}
+
 export function groupEventsByTournament(events: SofaEvent[]): TournamentGroup[] {
   const grouped = new Map<string, TournamentGroup>();
 

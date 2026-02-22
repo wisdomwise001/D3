@@ -1,6 +1,8 @@
-import React, { memo } from "react";
-import { View, Text, StyleSheet } from "react-native";
+import React, { memo, useCallback } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Platform } from "react-native";
 import { Image } from "expo-image";
+import { router } from "expo-router";
+import * as Haptics from "expo-haptics";
 import Colors from "@/constants/colors";
 import {
   SofaEvent,
@@ -27,8 +29,34 @@ function MatchRow({ event, isLast }: MatchRowProps) {
   const homeWin = finished && event.winnerCode === 1;
   const awayWin = finished && event.winnerCode === 2;
 
+  const handlePress = useCallback(() => {
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    router.push({
+      pathname: "/match/[id]",
+      params: {
+        id: event.id.toString(),
+        homeTeamName: event.homeTeam.shortName || event.homeTeam.name,
+        awayTeamName: event.awayTeam.shortName || event.awayTeam.name,
+        homeTeamId: event.homeTeam.id.toString(),
+        awayTeamId: event.awayTeam.id.toString(),
+        homeScore: homeScore?.toString() || "",
+        awayScore: awayScore?.toString() || "",
+        statusType: event.status?.type || "",
+        statusDescription: event.status?.description || "",
+        startTimestamp: event.startTimestamp?.toString() || "",
+        tournamentName: event.tournament?.uniqueTournament?.name || event.tournament?.name || "",
+        seasonId: "",
+        uniqueTournamentId: event.tournament?.uniqueTournament?.id?.toString() || "",
+      },
+    });
+  }, [event, homeScore, awayScore]);
+
   return (
-    <View
+    <TouchableOpacity
+      activeOpacity={0.6}
+      onPress={handlePress}
       style={[
         styles.container,
         !isLast && styles.borderBottom,
@@ -106,7 +134,7 @@ function MatchRow({ event, isLast }: MatchRowProps) {
           </Text>
         </View>
       )}
-    </View>
+    </TouchableOpacity>
   );
 }
 
