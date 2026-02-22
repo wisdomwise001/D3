@@ -105,9 +105,9 @@ export default function MatchDetailScreen() {
   const seasonId = event?.season?.id?.toString() || params.seasonId || "";
   const uniqueTournamentId = event?.tournament?.uniqueTournament?.id?.toString() || params.uniqueTournamentId || "";
 
-  const venue = event?.venue?.stadium || "";
-  const city = event?.venue?.city?.name || "";
-  const refereeStr = event?.referee?.name || "";
+  const venue = typeof event?.venue?.stadium === "string" ? event.venue.stadium : "";
+  const city = typeof event?.venue?.city?.name === "string" ? event.venue.city.name : "";
+  const refereeStr = typeof event?.referee?.name === "string" ? event.referee.name : "";
   const roundInfo = event?.roundInfo?.round ? `Round ${event.roundInfo.round}` : "";
 
   const goalScorers = useMemo(() => {

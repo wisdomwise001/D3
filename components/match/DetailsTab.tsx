@@ -277,14 +277,17 @@ function InfoRow({
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
-  value: string;
+  value: string | { name?: string; capacity?: number };
 }) {
+  const displayValue = typeof value === "object" && value !== null ? value.name || "" : String(value || "");
+  if (!displayValue) return null;
+
   return (
     <View style={styles.infoRow}>
       <Ionicons name={icon} size={16} color={Colors.dark.textSecondary} />
       <Text style={styles.infoLabel}>{label}</Text>
       <Text style={styles.infoValue} numberOfLines={1}>
-        {value}
+        {displayValue}
       </Text>
     </View>
   );
