@@ -7,7 +7,11 @@ import * as Linking from 'expo-linking';
 
 export default function FootballTab() {
   const downloadDocs = () => {
-    Linking.openURL(window.location.origin + '/api_docs.md');
+    if (Platform.OS === 'web') {
+      Linking.openURL(window.location.origin + '/api_docs.md');
+    } else {
+      Linking.openURL('https://' + process.env.EXPO_PUBLIC_DOMAIN + '/api_docs.md');
+    }
   };
 
   return (

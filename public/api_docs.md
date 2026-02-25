@@ -1,6 +1,6 @@
-# SofaScore Proxy API Documentation & Configuration Guide
+# Sports Fixtures Proxy API Documentation & Configuration Guide
 
-This document provides a comprehensive overview of how to set up and use the SofaScore proxy API. This configuration is designed to allow a mobile or web application to fetch sports data from SofaScore without hitting CORS issues or basic anti-bot blocks.
+This document provides a comprehensive overview of how to set up and use the sports data proxy API for both **Football** and **Basketball**. This configuration allows applications to fetch data from SofaScore without CORS issues or anti-bot blocks.
 
 ## 1. Backend Infrastructure (Express.js)
 
@@ -8,11 +8,11 @@ The proxy is built using Node.js and Express. It acts as a middleman between you
 
 ### Core Dependencies
 - `express`: Web framework.
-- `node-fetch` (or native `fetch` in Node 18+): To make outgoing requests to SofaScore.
+- `node-fetch` (or native `fetch` in Node 18+): For outgoing requests.
 
-### Proxy logic (`server/routes.ts`)
+### Proxy headers (`server/routes.ts`)
 
-The critical part of the proxy is the headers. SofaScore blocks generic scrapers, so you must mimic a browser.
+These headers are essential to mimic a standard browser request.
 
 ```typescript
 const SOFASCORE_API = "https://api.sofascore.com/api/v1";
@@ -27,7 +27,40 @@ const SOFASCORE_HEADERS = {
 };
 ```
 
-### Implementation Example (Data Proxy)
+## 2. Endpoints List
+
+### Fixtures & Events (Football & Basketball)
+- `GET /api/sport/:sport/scheduled-events/:date`
+  - Valid `:sport` values: `football`, `basketball`.
+  - `:date` format: `YYYY-MM-DD`.
+  - Fetch all scheduled matches for the given sport and date.
+- `GET /api/event/:eventId`
+  - Main match info (teams, scores, status, venue).
+- `GET /api/event/:eventId/incidents`
+  - Match events (Goals/Cards for Football; Quarter scores/Timeouts for Basketball).
+- `GET /api/event/:eventId/lineups`
+  - Starting players, benches, and coaches.
+- `GET /api/event/:eventId/statistics`
+  - Detailed stats (Possession, Shots, Corners for Football; Rebounds, Assists, FG% for Basketball).
+- `GET /api/event/:eventId/odds/1/all`
+  - Betting odds for various markets.
+- `GET /api/event/:eventId/h2h/events`
+  - Historical head-to-head match results.
+
+### League & Team Data
+- `GET /api/unique-tournament/:tournamentId/season/:seasonId/standings/total`
+  - League tables and standings.
+- `GET /api/team/:teamId/events/last/:page`
+  - Recent match history for a specific team.
+
+### Media (Image Proxy)
+- `GET /api/team/:teamId/image`
+- `GET /api/player/:playerId/image`
+- `GET /api/unique-tournament/:tournamentId/image`
+
+## 3. Implementation Details
+
+### Data Fetching
 ```typescript
 async function fetchSofaScore(endpoint: string) {
   const url = `${SOFASCORE_API}${endpoint}`;
@@ -35,76 +68,23 @@ async function fetchSofaScore(endpoint: string) {
   if (!res.ok) throw new Error(`SofaScore API error: ${res.status}`);
   return res.json();
 }
-
-// Route usage
-app.get("/api/event/:eventId", async (req, res) => {
-  const data = await fetchSofaScore(`/event/${req.params.eventId}`);
-  res.json(data);
-});
 ```
 
-### Implementation Example (Image Proxy)
-Images require converting the response to a buffer and setting the correct `Content-Type`.
+### Image Proxying (Critical)
+Images must be handled as buffers to preserve binary data.
 ```typescript
 async function proxyImage(imageUrl: string, res: Response) {
   const response = await fetch(imageUrl, { headers: SOFASCORE_HEADERS });
   const contentType = response.headers.get("content-type") || "image/png";
   res.setHeader("Content-Type", contentType);
-  res.setHeader("Cache-Control", "public, max-age=86400"); // Cache for 24h
+  res.setHeader("Cache-Control", "public, max-age=86400");
   const buffer = Buffer.from(await response.arrayBuffer());
   res.send(buffer);
 }
 ```
 
-## 2. Endpoints List
-
-### Matches & Fixtures
-- `GET /api/sport/:sport/scheduled-events/:date` (e.g., `/api/sport/football/scheduled-events/2024-03-10`)
-- `GET /api/event/:eventId` (Main match info)
-- `GET /api/event/:eventId/incidents` (Goals, cards, subs)
-- `GET /api/event/:eventId/lineups` (Starting XIs and ratings)
-- `GET /api/event/:eventId/statistics` (Possession, shots, etc.)
-- `GET /api/event/:eventId/odds/1/all` (Betting odds)
-- `GET /api/event/:eventId/h2h/events` (Head-to-head history)
-
-### Standings & Teams
-- `GET /api/unique-tournament/:tournamentId/season/:seasonId/standings/total` (League table)
-- `GET /api/team/:teamId/events/last/:page` (Team form/results)
-
-### Images
-- `GET /api/team/:teamId/image`
-- `GET /api/player/:playerId/image`
-- `GET /api/unique-tournament/:tournamentId/image`
-
-## 3. Client-Side Integration
-
-### Configuration
-In your Expo/React Native app, define a base API URL that points to your proxy server.
-
-```typescript
-// lib/api.ts
-const API_BASE = process.env.EXPO_PUBLIC_API_URL || "https://your-proxy-server.com/api";
-
-export async function fetchMatchDetails(id: string) {
-  const response = await fetch(`${API_BASE}/event/${id}`);
-  return response.json();
-}
-```
-
-### Caching Strategy
-Use `@tanstack/react-query` to handle data fetching, loading states, and automatic background refreshing.
-
-```typescript
-const { data } = useQuery({
-  queryKey: ['match', id],
-  queryFn: () => fetchMatchDetails(id),
-  refetchInterval: 30000, // Refresh every 30 seconds for live matches
-});
-```
-
-## 4. Deployment Instructions for Agents
-When instructing another agent to set this up:
-1. **Copy Headers**: Ensure the `SOFASCORE_HEADERS` are exactly as defined above.
-2. **Image Buffering**: Remind the agent to use `arrayBuffer()` and `Buffer.from()` for image proxying, as standard JSON parsing will fail.
-3. **CORS**: If using from a web browser, ensure the Express server has `cors` middleware enabled.
-4. **Environment Variables**: Set `EXPO_PUBLIC_API_URL` on the frontend to point to the backend's `/api` prefix.
+## 4. How to Setup for New Projects
+1. **Express Server**: Create an Express app and register the routes mapping to the endpoints above.
+2. **Environment Variables**: Define `EXPO_PUBLIC_API_URL` pointing to your Express server's `/api` path.
+3. **Frontend Integration**: Use `@tanstack/react-query` for efficient data fetching and caching.
+4. **CORS**: If running on web, remember to enable `cors` middleware in your Express app.
