@@ -537,15 +537,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (result.status === "fulfilled") lineupsByEventId.set(id, result.value);
         });
 
-        const homeLast7 = homeLast15.slice(0, 7);
-        const awayLast7 = awayLast15.slice(0, 7);
-        const last7EventIds = Array.from(new Set([...homeLast7, ...awayLast7].map((e: any) => e.id).filter(Boolean)));
+        const last15EventIds = Array.from(new Set([...homeLast15, ...awayLast15].map((e: any) => e.id).filter(Boolean)));
 
         const statsResults = await Promise.allSettled(
-          last7EventIds.map((id) => fetchSofaScore(`/event/${id}/statistics`)),
+          last15EventIds.map((id) => fetchSofaScore(`/event/${id}/statistics`)),
         );
         const statsByEventId = new Map<number, any>();
-        last7EventIds.forEach((id, index) => {
+        last15EventIds.forEach((id, index) => {
           const result = statsResults[index];
           if (result.status === "fulfilled") statsByEventId.set(id, result.value);
         });
@@ -557,11 +555,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return Number.isFinite(num) ? num : null;
         }
 
-        function extractMatchStatForTeam(statisticsData: any, side: "home" | "away"): Record<string, number> {
+        function extractPeriodStats(statisticsData: any, side: "home" | "away", period: "ALL" | "1ST" | "2ND"): Record<string, number> {
           const statMap: Record<string, number> = {};
-          const allPeriod = (statisticsData?.statistics || []).find((p: any) => p.period === "ALL") || statisticsData?.statistics?.[0];
-          if (!allPeriod) return statMap;
-          for (const group of (allPeriod.groups || [])) {
+          const periodData = (statisticsData?.statistics || []).find((p: any) => p.period === period);
+          if (!periodData) return statMap;
+          for (const group of (periodData.groups || [])) {
             for (const item of (group.statisticsItems || [])) {
               const rawName = (item.name || "").toLowerCase().trim();
               const val = parseStatNum(item[side]);
@@ -571,7 +569,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return statMap;
         }
 
-        type TeamMatchStats = {
+        type PeriodStats = {
+          avgGoalsScored: number | null;
+          avgGoalsConceded: number | null;
           avgPossession: number | null;
           avgXg: number | null;
           avgBigChances: number | null;
@@ -596,22 +596,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
           matchesWithStats: number;
         };
 
-        function computeTeamMatchStats(events: any[], teamId: number): TeamMatchStats {
+        type TeamMatchStats = {
+          all: PeriodStats;
+          firstHalf: PeriodStats;
+          secondHalf: PeriodStats;
+          matchesAnalyzed: number;
+        };
+
+        function buildPeriodSamples(
+          events: any[],
+          teamId: number,
+          period: "ALL" | "1ST" | "2ND",
+          goalScoreKey: "full" | "period1" | "period2",
+        ): { samples: Record<string, number[]>; matchesWithStats: number; goalScored: number[]; goalConceded: number[] } {
           const samples: Record<string, number[]> = {};
-          const addSample = (key: string, val: number | null) => {
-            if (val !== null) {
-              if (!samples[key]) samples[key] = [];
-              samples[key].push(val);
-            }
-          };
+          const goalScored: number[] = [];
+          const goalConceded: number[] = [];
           let matchesWithStats = 0;
+
+          const addS = (key: string, val: number | null) => {
+            if (val !== null) { if (!samples[key]) samples[key] = []; samples[key].push(val); }
+          };
+
+          const readGoalScore = (score: any): number | null => {
+            if (goalScoreKey === "full") {
+              const v = Number(score?.current ?? score?.display ?? score?.normaltime);
+              return Number.isFinite(v) ? v : null;
+            }
+            const v = Number(score?.[goalScoreKey]);
+            return Number.isFinite(v) ? v : null;
+          };
+
           events.forEach((event: any) => {
-            const side = event.homeTeam?.id === teamId ? "home" : event.awayTeam?.id === teamId ? "away" : null;
-            if (!side) return;
+            const isHome = event.homeTeam?.id === teamId;
+            const isAway = event.awayTeam?.id === teamId;
+            if (!isHome && !isAway) return;
+            const side: "home" | "away" = isHome ? "home" : "away";
+            const oppSide: "home" | "away" = isHome ? "away" : "home";
+
+            const teamGoals = readGoalScore(isHome ? event.homeScore : event.awayScore);
+            const oppGoals = readGoalScore(isHome ? event.awayScore : event.homeScore);
+            if (teamGoals !== null) goalScored.push(teamGoals);
+            if (oppGoals !== null) goalConceded.push(oppGoals);
+
             const statsData = statsByEventId.get(event.id);
             if (!statsData) return;
+            const s = extractPeriodStats(statsData, side, period);
+            if (Object.keys(s).length === 0) return;
             matchesWithStats += 1;
-            const s = extractMatchStatForTeam(statsData, side);
             const get = (keys: string[]): number | null => {
               for (const k of keys) {
                 const found = Object.keys(s).find((name) => name === k || name.includes(k));
@@ -619,33 +651,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
               }
               return null;
             };
-            addSample("possession", get(["ball possession"]));
-            addSample("xg", get(["expected goals (xg)", "expected goals"]));
-            addSample("bigChances", get(["big chances"]));
-            addSample("totalShots", get(["total shots", "shots total"]));
-            addSample("shotsOnTarget", get(["shots on target"]));
-            addSample("shotsOffTarget", get(["shots off target"]));
-            addSample("blockedShots", get(["blocked shots"]));
-            addSample("shotsInsideBox", get(["shots inside box"]));
-            addSample("bigChancesScored", get(["big chances scored"]));
-            addSample("bigChancesMissed", get(["big chances missed"]));
-            addSample("cornerKicks", get(["corner kicks"]));
-            addSample("goalkeeperSaves", get(["goalkeeper saves"]));
-            addSample("goalsPrevented", get(["goals prevented"]));
-            addSample("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %"]));
-            addSample("tacklesWon", get(["tackles won", "tackles %"]));
-            addSample("interceptions", get(["interceptions"]));
-            addSample("clearances", get(["clearances"]));
-            addSample("fouls", get(["fouls"]));
-            addSample("totalPasses", get(["total passes", "passes"]));
-            addSample("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]));
-            addSample("duelsWon", get(["total duels won", "duels won"]));
+            addS("possession", get(["ball possession"]));
+            addS("xg", get(["expected goals (xg)", "expected goals"]));
+            addS("bigChances", get(["big chances"]));
+            addS("totalShots", get(["total shots", "shots total"]));
+            addS("shotsOnTarget", get(["shots on target"]));
+            addS("shotsOffTarget", get(["shots off target"]));
+            addS("blockedShots", get(["blocked shots"]));
+            addS("shotsInsideBox", get(["shots inside box"]));
+            addS("bigChancesScored", get(["big chances scored"]));
+            addS("bigChancesMissed", get(["big chances missed"]));
+            addS("cornerKicks", get(["corner kicks"]));
+            addS("goalkeeperSaves", get(["goalkeeper saves"]));
+            addS("goalsPrevented", get(["goals prevented"]));
+            addS("passAccuracy", get(["pass accuracy", "passes %", "accurate passes %"]));
+            addS("tacklesWon", get(["tackles won", "tackles %"]));
+            addS("interceptions", get(["interceptions"]));
+            addS("clearances", get(["clearances"]));
+            addS("fouls", get(["fouls"]));
+            addS("totalPasses", get(["total passes", "passes"]));
+            addS("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]));
+            addS("duelsWon", get(["total duels won", "duels won"]));
           });
+
+          return { samples, matchesWithStats, goalScored, goalConceded };
+        }
+
+        function avgArr(vals: number[]): number | null {
+          return vals.length > 0 ? round1(vals.reduce((s2, v) => s2 + v, 0) / vals.length) : null;
+        }
+
+        function periodStatsToPeriodStats(
+          events: any[],
+          teamId: number,
+          period: "ALL" | "1ST" | "2ND",
+          goalScoreKey: "full" | "period1" | "period2",
+        ): PeriodStats {
+          const { samples, matchesWithStats, goalScored, goalConceded } = buildPeriodSamples(events, teamId, period, goalScoreKey);
           const avg = (key: string): number | null => {
             const vals = samples[key];
             return vals && vals.length > 0 ? round1(vals.reduce((s2, v) => s2 + v, 0) / vals.length) : null;
           };
           return {
+            avgGoalsScored: avgArr(goalScored),
+            avgGoalsConceded: avgArr(goalConceded),
             avgPossession: avg("possession"),
             avgXg: avg("xg"),
             avgBigChances: avg("bigChances"),
@@ -668,6 +717,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
             avgTouchesInOppositionBox: avg("touchesOpBox"),
             avgDuelsWon: avg("duelsWon"),
             matchesWithStats,
+          };
+        }
+
+        function computeTeamMatchStats(events: any[], teamId: number): TeamMatchStats {
+          return {
+            all: periodStatsToPeriodStats(events, teamId, "ALL", "full"),
+            firstHalf: periodStatsToPeriodStats(events, teamId, "1ST", "period1"),
+            secondHalf: periodStatsToPeriodStats(events, teamId, "2ND", "period2"),
+            matchesAnalyzed: events.length,
           };
         }
 
@@ -1221,8 +1279,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const homeHistory = collectTeamHistory(homeLast15, homeTeamId);
         const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
-        const homeTeamMatchStats = computeTeamMatchStats(homeLast7, homeTeamId);
-        const awayTeamMatchStats = computeTeamMatchStats(awayLast7, awayTeamId);
+        const homeTeamMatchStats = computeTeamMatchStats(homeLast15, homeTeamId);
+        const awayTeamMatchStats = computeTeamMatchStats(awayLast15, awayTeamId);
 
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);

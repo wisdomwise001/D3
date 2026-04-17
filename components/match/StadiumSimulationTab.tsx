@@ -84,7 +84,9 @@ interface FormSummary {
   recentForm: ("W" | "D" | "L")[];
 }
 
-interface TeamMatchStats {
+interface PeriodStats {
+  avgGoalsScored: number | null;
+  avgGoalsConceded: number | null;
   avgPossession: number | null;
   avgXg: number | null;
   avgBigChances: number | null;
@@ -107,6 +109,13 @@ interface TeamMatchStats {
   avgTouchesInOppositionBox: number | null;
   avgDuelsWon: number | null;
   matchesWithStats: number;
+}
+
+interface TeamMatchStats {
+  all: PeriodStats;
+  firstHalf: PeriodStats;
+  secondHalf: PeriodStats;
+  matchesAnalyzed: number;
 }
 
 interface SimulationMetricsResponse {
@@ -371,22 +380,22 @@ function createLiveEvent(
   return { minute, team, type, text: textByType[type] };
 }
 
-function teamStatsAttackFactor(ts?: TeamMatchStats | null): number | null {
-  if (!ts) return null;
-  const xgF = ts.avgXg != null ? clampForSimulation(4 + (ts.avgXg / 2.0) * 4, 3, 9.5) : null;
-  const sotF = ts.avgShotsOnTarget != null ? clampForSimulation(4 + (ts.avgShotsOnTarget / 5.5) * 3.5, 3, 9.5) : null;
-  const bcF = ts.avgBigChances != null ? clampForSimulation(4 + (ts.avgBigChances / 4.5) * 3, 3, 9) : null;
-  const sibF = ts.avgShotsInsideBox != null ? clampForSimulation(4 + (ts.avgShotsInsideBox / 8) * 3, 3, 9) : null;
+function teamStatsAttackFactor(ps?: PeriodStats | null): number | null {
+  if (!ps) return null;
+  const xgF = ps.avgXg != null ? clampForSimulation(4 + (ps.avgXg / 2.0) * 4, 3, 9.5) : null;
+  const sotF = ps.avgShotsOnTarget != null ? clampForSimulation(4 + (ps.avgShotsOnTarget / 5.5) * 3.5, 3, 9.5) : null;
+  const bcF = ps.avgBigChances != null ? clampForSimulation(4 + (ps.avgBigChances / 4.5) * 3, 3, 9) : null;
+  const sibF = ps.avgShotsInsideBox != null ? clampForSimulation(4 + (ps.avgShotsInsideBox / 8) * 3, 3, 9) : null;
   const vals = [xgF, sotF, bcF, sibF].filter((v): v is number => v !== null);
   return vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
 }
 
-function teamStatsDefenseFactor(ts?: TeamMatchStats | null): number | null {
-  if (!ts) return null;
-  const gpF = ts.avgGoalsPrevented != null ? clampForSimulation(6 + ts.avgGoalsPrevented * 2.2, 3, 9.5) : null;
-  const clrF = ts.avgClearances != null ? clampForSimulation(4 + (ts.avgClearances / 17) * 3.5, 3, 9) : null;
-  const intF = ts.avgInterceptions != null ? clampForSimulation(4 + (ts.avgInterceptions / 10) * 3.5, 3, 9) : null;
-  const twF = ts.avgTacklesWon != null ? clampForSimulation(4 + (ts.avgTacklesWon / 60) * 4, 3, 9) : null;
+function teamStatsDefenseFactor(ps?: PeriodStats | null): number | null {
+  if (!ps) return null;
+  const gpF = ps.avgGoalsPrevented != null ? clampForSimulation(6 + ps.avgGoalsPrevented * 2.2, 3, 9.5) : null;
+  const clrF = ps.avgClearances != null ? clampForSimulation(4 + (ps.avgClearances / 17) * 3.5, 3, 9) : null;
+  const intF = ps.avgInterceptions != null ? clampForSimulation(4 + (ps.avgInterceptions / 10) * 3.5, 3, 9) : null;
+  const twF = ps.avgTacklesWon != null ? clampForSimulation(4 + (ps.avgTacklesWon / 60) * 4, 3, 9) : null;
   const vals = [gpF, clrF, intF, twF].filter((v): v is number => v !== null);
   return vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
 }
@@ -421,10 +430,10 @@ function buildSimulationContext({
   const homeFormBoost = homeForm?.formStrength || homeStrength || 6.4;
   const awayFormBoost = awayForm?.formStrength || awayStrength || 6.4;
 
-  const homeStatsAttack = teamStatsAttackFactor(homeTeamStats);
-  const awayStatsAttack = teamStatsAttackFactor(awayTeamStats);
-  const homeStatsDefense = teamStatsDefenseFactor(homeTeamStats);
-  const awayStatsDefense = teamStatsDefenseFactor(awayTeamStats);
+  const homeStatsAttack = teamStatsAttackFactor(homeTeamStats?.all);
+  const awayStatsAttack = teamStatsAttackFactor(awayTeamStats?.all);
+  const homeStatsDefense = teamStatsDefenseFactor(homeTeamStats?.all);
+  const awayStatsDefense = teamStatsDefenseFactor(awayTeamStats?.all);
 
   const blendedHomeScoring = homeStatsAttack != null ? homeScoring * 0.62 + homeStatsAttack * 0.38 : homeScoring;
   const blendedAwayScoring = awayStatsAttack != null ? awayScoring * 0.62 + awayStatsAttack * 0.38 : awayScoring;
@@ -434,7 +443,7 @@ function buildSimulationContext({
   const totalPower = Math.max(homePower + awayPower, 1);
   const homeChance = homePower / totalPower;
 
-  const rawPossession = homeTeamStats?.avgPossession ?? null;
+  const rawPossession = homeTeamStats?.all?.avgPossession ?? null;
   const possessionTarget = rawPossession != null
     ? Math.round(rawPossession * 0.6 + homeChance * 100 * 0.4)
     : Math.round(homeChance * 100);
@@ -795,7 +804,39 @@ function statColor(homeVal: number | null | undefined, awayVal: number | null | 
   };
 }
 
-function Last7StatsCard({
+type StatViewPeriod = "all" | "firstHalf" | "secondHalf";
+
+function buildStatRows(home?: PeriodStats | null, away?: PeriodStats | null) {
+  type StatRow = { label: string; homeVal: number | null | undefined; awayVal: number | null | undefined; unit?: string; higherIsBetter: boolean; section?: string };
+  const rows: StatRow[] = [
+    { section: "Goals", label: "Goals Scored", homeVal: home?.avgGoalsScored, awayVal: away?.avgGoalsScored, higherIsBetter: true },
+    { label: "Goals Conceded", homeVal: home?.avgGoalsConceded, awayVal: away?.avgGoalsConceded, higherIsBetter: false },
+    { section: "Match Overview", label: "Possession", homeVal: home?.avgPossession, awayVal: away?.avgPossession, unit: "%", higherIsBetter: true },
+    { label: "Expected Goals (xG)", homeVal: home?.avgXg, awayVal: away?.avgXg, higherIsBetter: true },
+    { label: "Big Chances", homeVal: home?.avgBigChances, awayVal: away?.avgBigChances, higherIsBetter: true },
+    { label: "Total Shots", homeVal: home?.avgTotalShots, awayVal: away?.avgTotalShots, higherIsBetter: true },
+    { label: "Corner Kicks", homeVal: home?.avgCornerKicks, awayVal: away?.avgCornerKicks, higherIsBetter: true },
+    { label: "Fouls", homeVal: home?.avgFouls, awayVal: away?.avgFouls, higherIsBetter: false },
+    { section: "Shooting", label: "Shots on Target", homeVal: home?.avgShotsOnTarget, awayVal: away?.avgShotsOnTarget, higherIsBetter: true },
+    { label: "Shots off Target", homeVal: home?.avgShotsOffTarget, awayVal: away?.avgShotsOffTarget, higherIsBetter: false },
+    { label: "Blocked Shots", homeVal: home?.avgBlockedShots, awayVal: away?.avgBlockedShots, higherIsBetter: false },
+    { label: "Shots Inside Box", homeVal: home?.avgShotsInsideBox, awayVal: away?.avgShotsInsideBox, higherIsBetter: true },
+    { label: "Big Chances Scored", homeVal: home?.avgBigChancesScored, awayVal: away?.avgBigChancesScored, higherIsBetter: true },
+    { label: "Big Chances Missed", homeVal: home?.avgBigChancesMissed, awayVal: away?.avgBigChancesMissed, higherIsBetter: false },
+    { label: "Opp. Box Touches", homeVal: home?.avgTouchesInOppositionBox, awayVal: away?.avgTouchesInOppositionBox, higherIsBetter: true },
+    { section: "Passing", label: "Pass Accuracy", homeVal: home?.avgPassAccuracy, awayVal: away?.avgPassAccuracy, unit: "%", higherIsBetter: true },
+    { label: "Total Passes", homeVal: home?.avgTotalPasses, awayVal: away?.avgTotalPasses, higherIsBetter: true },
+    { section: "Defending", label: "Duels Won", homeVal: home?.avgDuelsWon, awayVal: away?.avgDuelsWon, unit: "%", higherIsBetter: true },
+    { label: "Tackles Won", homeVal: home?.avgTacklesWon, awayVal: away?.avgTacklesWon, unit: "%", higherIsBetter: true },
+    { label: "Interceptions", homeVal: home?.avgInterceptions, awayVal: away?.avgInterceptions, higherIsBetter: true },
+    { label: "Clearances", homeVal: home?.avgClearances, awayVal: away?.avgClearances, higherIsBetter: true },
+    { section: "Goalkeeping", label: "GK Saves", homeVal: home?.avgGoalkeeperSaves, awayVal: away?.avgGoalkeeperSaves, higherIsBetter: true },
+    { label: "Goals Prevented", homeVal: home?.avgGoalsPrevented, awayVal: away?.avgGoalsPrevented, higherIsBetter: true },
+  ];
+  return rows;
+}
+
+function TeamStatsCard({
   homeTeamName,
   awayTeamName,
   homeStats,
@@ -806,68 +847,72 @@ function Last7StatsCard({
   homeStats?: TeamMatchStats | null;
   awayStats?: TeamMatchStats | null;
 }) {
+  const [period, setPeriod] = React.useState<StatViewPeriod>("all");
+
   if (!homeStats && !awayStats) return null;
-  const hasAnyStats = (homeStats?.matchesWithStats || 0) > 0 || (awayStats?.matchesWithStats || 0) > 0;
-  if (!hasAnyStats) return null;
+  const matchesAnalyzed = homeStats?.matchesAnalyzed || awayStats?.matchesAnalyzed || 0;
+  if (matchesAnalyzed === 0) return null;
 
-  type StatRow = {
-    label: string;
-    homeVal: number | null | undefined;
-    awayVal: number | null | undefined;
-    unit?: string;
-    higherIsBetter: boolean;
-    section?: string;
-  };
+  const homeP = period === "all" ? homeStats?.all : period === "firstHalf" ? homeStats?.firstHalf : homeStats?.secondHalf;
+  const awayP = period === "all" ? awayStats?.all : period === "firstHalf" ? awayStats?.firstHalf : awayStats?.secondHalf;
 
-  const rows: StatRow[] = [
-    { section: "Match Overview", label: "Possession", homeVal: homeStats?.avgPossession, awayVal: awayStats?.avgPossession, unit: "%", higherIsBetter: true },
-    { label: "Expected Goals (xG)", homeVal: homeStats?.avgXg, awayVal: awayStats?.avgXg, higherIsBetter: true },
-    { label: "Big Chances", homeVal: homeStats?.avgBigChances, awayVal: awayStats?.avgBigChances, higherIsBetter: true },
-    { label: "Total Shots", homeVal: homeStats?.avgTotalShots, awayVal: awayStats?.avgTotalShots, higherIsBetter: true },
-    { label: "Corner Kicks", homeVal: homeStats?.avgCornerKicks, awayVal: awayStats?.avgCornerKicks, higherIsBetter: true },
-    { label: "Fouls", homeVal: homeStats?.avgFouls, awayVal: awayStats?.avgFouls, higherIsBetter: false },
-    { section: "Shooting", label: "Shots on Target", homeVal: homeStats?.avgShotsOnTarget, awayVal: awayStats?.avgShotsOnTarget, higherIsBetter: true },
-    { label: "Shots off Target", homeVal: homeStats?.avgShotsOffTarget, awayVal: awayStats?.avgShotsOffTarget, higherIsBetter: false },
-    { label: "Blocked Shots", homeVal: homeStats?.avgBlockedShots, awayVal: awayStats?.avgBlockedShots, higherIsBetter: false },
-    { label: "Shots Inside Box", homeVal: homeStats?.avgShotsInsideBox, awayVal: awayStats?.avgShotsInsideBox, higherIsBetter: true },
-    { label: "Big Chances Scored", homeVal: homeStats?.avgBigChancesScored, awayVal: awayStats?.avgBigChancesScored, higherIsBetter: true },
-    { label: "Big Chances Missed", homeVal: homeStats?.avgBigChancesMissed, awayVal: awayStats?.avgBigChancesMissed, higherIsBetter: false },
-    { label: "Opp. Box Touches", homeVal: homeStats?.avgTouchesInOppositionBox, awayVal: awayStats?.avgTouchesInOppositionBox, higherIsBetter: true },
-    { section: "Passing", label: "Pass Accuracy", homeVal: homeStats?.avgPassAccuracy, awayVal: awayStats?.avgPassAccuracy, unit: "%", higherIsBetter: true },
-    { label: "Total Passes", homeVal: homeStats?.avgTotalPasses, awayVal: awayStats?.avgTotalPasses, higherIsBetter: true },
-    { section: "Defending", label: "Duels Won", homeVal: homeStats?.avgDuelsWon, awayVal: awayStats?.avgDuelsWon, unit: "%", higherIsBetter: true },
-    { label: "Tackles Won", homeVal: homeStats?.avgTacklesWon, awayVal: awayStats?.avgTacklesWon, unit: "%", higherIsBetter: true },
-    { label: "Interceptions", homeVal: homeStats?.avgInterceptions, awayVal: awayStats?.avgInterceptions, higherIsBetter: true },
-    { label: "Clearances", homeVal: homeStats?.avgClearances, awayVal: awayStats?.avgClearances, higherIsBetter: true },
-    { section: "Goalkeeping", label: "GK Saves", homeVal: homeStats?.avgGoalkeeperSaves, awayVal: awayStats?.avgGoalkeeperSaves, higherIsBetter: true },
-    { label: "Goals Prevented", homeVal: homeStats?.avgGoalsPrevented, awayVal: awayStats?.avgGoalsPrevented, higherIsBetter: true },
+  const hasData = (homeP?.matchesWithStats || 0) > 0 || (awayP?.matchesWithStats || 0) > 0 ||
+    (homeP?.avgGoalsScored != null) || (awayP?.avgGoalsScored != null);
+
+  const rows = buildStatRows(homeP, awayP);
+  const periodLabel = period === "all" ? "Full Match" : period === "firstHalf" ? "1st Half" : "2nd Half";
+  const tabs: { key: StatViewPeriod; label: string }[] = [
+    { key: "all", label: "Last 15" },
+    { key: "firstHalf", label: "1st Half" },
+    { key: "secondHalf", label: "2nd Half" },
   ];
 
   return (
     <View style={styles.phaseCard}>
       <Text style={styles.cardLabel}>
-        Last 7 match stats · {homeStats?.matchesWithStats || 0}/{awayStats?.matchesWithStats || 0} matches with data
+        Team match stats · {matchesAnalyzed} matches · {homeP?.matchesWithStats || 0}/{awayP?.matchesWithStats || 0} with full data
       </Text>
-      <View style={styles.statsHeaderRow}>
-        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
-        <Text style={styles.statsHeaderLabel}>Stat</Text>
-        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      <View style={styles.periodToggle}>
+        {tabs.map((tab) => (
+          <TouchableOpacity
+            key={tab.key}
+            style={[styles.periodTab, period === tab.key && styles.periodTabActive]}
+            onPress={() => setPeriod(tab.key)}
+            activeOpacity={0.75}
+          >
+            <Text style={[styles.periodTabText, period === tab.key && styles.periodTabTextActive]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
-      {rows.map((row, index) => {
-        const colors = statColor(row.homeVal, row.awayVal, row.higherIsBetter);
-        return (
-          <View key={`${row.label}-${index}`}>
-            {row.section && (
-              <Text style={styles.statsSectionLabel}>{row.section}</Text>
-            )}
-            <View style={styles.statsRow}>
-              <Text style={[styles.statsValue, { color: colors.home }]}>{fmt(row.homeVal, row.unit)}</Text>
-              <Text style={styles.statsLabel}>{row.label}</Text>
-              <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{fmt(row.awayVal, row.unit)}</Text>
-            </View>
+      {!hasData ? (
+        <Text style={styles.statsNoData}>No {periodLabel.toLowerCase()} statistics available for these matches.</Text>
+      ) : (
+        <>
+          <View style={styles.statsHeaderRow}>
+            <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+            <Text style={styles.statsHeaderLabel}>Avg {periodLabel}</Text>
+            <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
           </View>
-        );
-      })}
+          {rows.map((row, index) => {
+            const colors = statColor(row.homeVal, row.awayVal, row.higherIsBetter);
+            if (row.homeVal == null && row.awayVal == null && !row.section) return null;
+            return (
+              <View key={`${row.label}-${index}`}>
+                {row.section && (
+                  <Text style={styles.statsSectionLabel}>{row.section}</Text>
+                )}
+                <View style={styles.statsRow}>
+                  <Text style={[styles.statsValue, { color: colors.home }]}>{fmt(row.homeVal, row.unit)}</Text>
+                  <Text style={styles.statsLabel}>{row.label}</Text>
+                  <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{fmt(row.awayVal, row.unit)}</Text>
+                </View>
+              </View>
+            );
+          })}
+        </>
+      )}
     </View>
   );
 }
@@ -1061,7 +1106,7 @@ function StadiumSimulationTab({
         awayForm={simulationMetrics?.away?.formSummary}
       />
 
-      <Last7StatsCard
+      <TeamStatsCard
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
         homeStats={simulationMetrics?.home?.teamMatchStats}
@@ -1647,5 +1692,37 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_700Bold",
     textAlign: "center",
+  },
+  periodToggle: {
+    flexDirection: "row",
+    backgroundColor: Colors.dark.surfaceSecondary,
+    borderRadius: 10,
+    padding: 3,
+    marginBottom: 14,
+    marginTop: 4,
+  },
+  periodTab: {
+    flex: 1,
+    paddingVertical: 7,
+    alignItems: "center",
+    borderRadius: 8,
+  },
+  periodTabActive: {
+    backgroundColor: Colors.dark.accent,
+  },
+  periodTabText: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+  },
+  periodTabTextActive: {
+    color: Colors.dark.text,
+  },
+  statsNoData: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    textAlign: "center",
+    paddingVertical: 16,
   },
 });
