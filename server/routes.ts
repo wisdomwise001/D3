@@ -28,6 +28,25 @@ async function fetchSofaScore(endpoint: string) {
   return res.json();
 }
 
+function readEventScore(score: any): number | null {
+  const value = Number(score?.current ?? score?.display ?? score?.normaltime);
+  return Number.isFinite(value) ? value : null;
+}
+
+function selectLastPlayedTeamMatches(events: any[], teamId: number, currentStartTimestamp?: number): any[] {
+  return events
+    .filter((event: any) => {
+      const startTimestamp = Number(event.startTimestamp);
+      const isTeamMatch = event.homeTeam?.id === teamId || event.awayTeam?.id === teamId;
+      const isBeforeCurrent = currentStartTimestamp ? startTimestamp < currentStartTimestamp : true;
+      const hasScore = readEventScore(event.homeScore) !== null && readEventScore(event.awayScore) !== null;
+      const isFinished = event.status?.type === "finished" || hasScore;
+      return isTeamMatch && isBeforeCurrent && isFinished;
+    })
+    .sort((a: any, b: any) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))
+    .slice(0, 15);
+}
+
 async function proxyImage(imageUrl: string, res: Response) {
   try {
     const response = await fetch(imageUrl, { headers: SOFASCORE_HEADERS });
@@ -112,8 +131,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
         ]);
 
-        const homeLast15: any[] = (homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : []).slice(0, 15);
-        const awayLast15: any[] = (awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : []).slice(0, 15);
+        const currentStartTimestamp = Number(event?.startTimestamp) || undefined;
+        const homeLast15: any[] = selectLastPlayedTeamMatches(
+          homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : [],
+          homeTeamId,
+          currentStartTimestamp,
+        );
+        const awayLast15: any[] = selectLastPlayedTeamMatches(
+          awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : [],
+          awayTeamId,
+          currentStartTimestamp,
+        );
         const historicalEventIds = Array.from(
           new Set([...homeLast15, ...awayLast15].map((pastEvent: any) => pastEvent.id).filter(Boolean)),
         );
@@ -480,17 +508,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "homeTeamId and awayTeamId are required" });
         }
 
-        const [currentLineupsResult, homeEventsResult, awayEventsResult] = await Promise.allSettled([
+        const [currentEventResult, currentLineupsResult, homeEventsResult, awayEventsResult] = await Promise.allSettled([
+          fetchSofaScore(`/event/${eventId}`),
           fetchSofaScore(`/event/${eventId}/lineups`),
           fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
           fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
         ]);
 
+        const currentEvent: any = currentEventResult.status === "fulfilled" ? currentEventResult.value?.event : null;
         const currentLineups: any = currentLineupsResult.status === "fulfilled" ? currentLineupsResult.value : null;
         const homeEvents: any[] = homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : [];
         const awayEvents: any[] = awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : [];
-        const homeLast15 = homeEvents.slice(0, 15);
-        const awayLast15 = awayEvents.slice(0, 15);
+        const currentStartTimestamp = Number(currentEvent?.startTimestamp) || undefined;
+        const homeLast15 = selectLastPlayedTeamMatches(homeEvents, homeTeamId, currentStartTimestamp);
+        const awayLast15 = selectLastPlayedTeamMatches(awayEvents, awayTeamId, currentStartTimestamp);
 
         const historicalEventIds = Array.from(
           new Set([...homeLast15, ...awayLast15].map((event: any) => event.id).filter(Boolean)),
@@ -1239,8 +1270,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const currentMatchOddsRaw = eventOddsData.status === "fulfilled" ? eventOddsData.value : null;
       const currentEvent = eventData.status === "fulfilled" ? (eventData.value as any)?.event : null;
 
-      const last15Home = homeEvents.slice(0, 15);
-      const last15Away = awayEvents.slice(0, 15);
+      const currentStartTimestamp = Number(currentEvent?.startTimestamp) || undefined;
+      const last15Home = selectLastPlayedTeamMatches(homeEvents, homeTeamId, currentStartTimestamp);
+      const last15Away = selectLastPlayedTeamMatches(awayEvents, awayTeamId, currentStartTimestamp);
 
       // ── Fetch odds for every historical match (for TMP B & D pillars) ────────
 
