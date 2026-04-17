@@ -30,9 +30,28 @@ interface MatchesTabProps {
   awayTeamId: number;
   homeTeamName: string;
   awayTeamName: string;
+  currentStartTimestamp?: number;
 }
 
-function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: MatchesTabProps) {
+function readScore(score?: { display?: number; current?: number }): number | null {
+  const value = Number(score?.display ?? score?.current);
+  return Number.isFinite(value) ? value : null;
+}
+
+function selectRecentMatches(events: MatchEvent[], teamId: number, currentStartTimestamp?: number): MatchEvent[] {
+  return events
+    .filter((match) => {
+      const isTeamMatch = match.homeTeam.id === teamId || match.awayTeam.id === teamId;
+      const isBeforeCurrent = currentStartTimestamp ? match.startTimestamp < currentStartTimestamp : true;
+      const hasScore = readScore(match.homeScore) !== null && readScore(match.awayScore) !== null;
+      const isFinished = match.status?.type === "finished" || hasScore;
+      return isTeamMatch && isBeforeCurrent && isFinished;
+    })
+    .sort((a, b) => b.startTimestamp - a.startTimestamp)
+    .slice(0, 15);
+}
+
+function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName, currentStartTimestamp }: MatchesTabProps) {
   const router = useRouter();
   const { data: homeData, isLoading: homeLoading } = useQuery<{ events: MatchEvent[] }>({
     queryKey: ["/api/team", homeTeamId.toString(), "events", "last", "0"],
@@ -67,8 +86,8 @@ function MatchesTab({ homeTeamId, awayTeamId, homeTeamName, awayTeamName }: Matc
     );
   }
 
-  const homeMatches = (homeData?.events || []).slice(0, 15);
-  const awayMatches = (awayData?.events || []).slice(0, 15);
+  const homeMatches = selectRecentMatches(homeData?.events || [], homeTeamId, currentStartTimestamp);
+  const awayMatches = selectRecentMatches(awayData?.events || [], awayTeamId, currentStartTimestamp);
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>

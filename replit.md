@@ -12,4 +12,5 @@
 - Simulation tab keeps the visible 90-minute countdown, then runs 1,000,000 fast match-engine simulations and displays the top 20 scorelines by frequency.
 - Simulation now adds recent team form strength with the requested scoring rules: 3 for win, 1 for draw, 0 for loss, +2 for wins by 2+ goals, +1 for clean sheets, -1 for draws, and -1 for 0-0. It also calculates separate scoring strength and defending strength from recent goals, scoring rate, big wins, goals conceded, and clean sheets, then feeds those values into the match engine.
 - Last-15 match extraction now filters to completed matches before the current fixture, sorts them newest-to-oldest by kickoff timestamp, and then takes 15, avoiding accidental selection of older past-season matches from provider ordering.
+- The Matches tab also now applies the same newest-first sorting/filtering because SofaScore's `/team/:id/events/last/0` response can arrive oldest-to-newest inside the page, as seen for Sassuolo.
 - Metro ignores `.local` and `.cache` runtime folders to avoid watcher crashes from transient Replit state files.

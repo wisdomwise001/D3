@@ -236,6 +236,7 @@ export default function MatchDetailScreen() {
             awayTeamId={awayTeamId}
             homeTeamName={homeTeamName}
             awayTeamName={awayTeamName}
+            currentStartTimestamp={startTimestamp}
           />
         )}
         {activeTab === "Odds" && (
