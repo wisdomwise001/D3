@@ -28,6 +28,26 @@ async function fetchSofaScore(endpoint: string) {
   return res.json();
 }
 
+async function fetchTeamLastEvents(teamId: number): Promise<any[]> {
+  const pages = [0, 1, 2];
+  const results = await Promise.allSettled(
+    pages.map((page) => fetchSofaScore(`/team/${teamId}/events/last/${page}`))
+  );
+  const seen = new Set<number>();
+  const events: any[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      for (const event of result.value?.events || []) {
+        if (event?.id && !seen.has(event.id)) {
+          seen.add(event.id);
+          events.push(event);
+        }
+      }
+    }
+  }
+  return events;
+}
+
 function readEventScore(score: any): number | null {
   const value = Number(score?.current ?? score?.display ?? score?.normaltime);
   return Number.isFinite(value) ? value : null;
@@ -126,19 +146,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.json(currentLineups || { confirmed: false, home: { players: [] }, away: { players: [] } });
         }
 
-        const [homeEventsResult, awayEventsResult] = await Promise.allSettled([
-          fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
-          fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
+        const [homeEventsAll, awayEventsAll] = await Promise.all([
+          fetchTeamLastEvents(homeTeamId),
+          fetchTeamLastEvents(awayTeamId),
         ]);
 
         const currentStartTimestamp = Number(event?.startTimestamp) || undefined;
         const homeLast15: any[] = selectLastPlayedTeamMatches(
-          homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : [],
+          homeEventsAll,
           homeTeamId,
           currentStartTimestamp,
         );
         const awayLast15: any[] = selectLastPlayedTeamMatches(
-          awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : [],
+          awayEventsAll,
           awayTeamId,
           currentStartTimestamp,
         );
@@ -508,17 +528,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "homeTeamId and awayTeamId are required" });
         }
 
-        const [currentEventResult, currentLineupsResult, homeEventsResult, awayEventsResult] = await Promise.allSettled([
-          fetchSofaScore(`/event/${eventId}`),
-          fetchSofaScore(`/event/${eventId}/lineups`),
-          fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
-          fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
+        const [[currentEventResult, currentLineupsResult], homeEvents, awayEvents] = await Promise.all([
+          Promise.allSettled([
+            fetchSofaScore(`/event/${eventId}`),
+            fetchSofaScore(`/event/${eventId}/lineups`),
+          ]),
+          fetchTeamLastEvents(homeTeamId),
+          fetchTeamLastEvents(awayTeamId),
         ]);
 
         const currentEvent: any = currentEventResult.status === "fulfilled" ? currentEventResult.value?.event : null;
         const currentLineups: any = currentLineupsResult.status === "fulfilled" ? currentLineupsResult.value : null;
-        const homeEvents: any[] = homeEventsResult.status === "fulfilled" ? homeEventsResult.value?.events || [] : [];
-        const awayEvents: any[] = awayEventsResult.status === "fulfilled" ? awayEventsResult.value?.events || [] : [];
         const currentStartTimestamp = Number(currentEvent?.startTimestamp) || undefined;
         const homeLast15 = selectLastPlayedTeamMatches(homeEvents, homeTeamId, currentStartTimestamp);
         const awayLast15 = selectLastPlayedTeamMatches(awayEvents, awayTeamId, currentStartTimestamp);
@@ -1455,17 +1475,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // ── Fetch base data ──────────────────────────────────────────────────────
 
-      const [homeEventsData, awayEventsData, eventOddsData, eventData] = await Promise.allSettled([
-        fetchSofaScore(`/team/${homeTeamId}/events/last/0`),
-        fetchSofaScore(`/team/${awayTeamId}/events/last/0`),
-        eventId ? fetchSofaScore(`/event/${eventId}/odds/1/all`) : Promise.resolve(null),
-        eventId ? fetchSofaScore(`/event/${eventId}`) : Promise.resolve(null),
+      const [homeEvents, awayEvents, [eventOddsResult, eventDataResult]] = await Promise.all([
+        fetchTeamLastEvents(homeTeamId),
+        fetchTeamLastEvents(awayTeamId),
+        Promise.allSettled([
+          eventId ? fetchSofaScore(`/event/${eventId}/odds/1/all`) : Promise.resolve(null),
+          eventId ? fetchSofaScore(`/event/${eventId}`) : Promise.resolve(null),
+        ]),
       ]);
 
-      const homeEvents: any[] = homeEventsData.status === "fulfilled" ? (homeEventsData.value as any)?.events || [] : [];
-      const awayEvents: any[] = awayEventsData.status === "fulfilled" ? (awayEventsData.value as any)?.events || [] : [];
-      const currentMatchOddsRaw = eventOddsData.status === "fulfilled" ? eventOddsData.value : null;
-      const currentEvent = eventData.status === "fulfilled" ? (eventData.value as any)?.event : null;
+      const currentMatchOddsRaw = eventOddsResult.status === "fulfilled" ? eventOddsResult.value : null;
+      const currentEvent = eventDataResult.status === "fulfilled" ? (eventDataResult.value as any)?.event : null;
 
       const currentStartTimestamp = Number(currentEvent?.startTimestamp) || undefined;
       const last15Home = selectLastPlayedTeamMatches(homeEvents, homeTeamId, currentStartTimestamp);
