@@ -168,7 +168,7 @@ export default function AIInsightTab({
       const res = await fetch(url);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Server error ${res.status}`);
+        throw new Error(err.error || "AI insight could not be generated right now. Please try again.");
       }
       const data = await res.json();
       setAnalysis(data.analysis);

@@ -1608,7 +1608,16 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
       });
     } catch (error: any) {
       console.error("Error generating AI insight:", error.message);
-      res.status(500).json({ error: error.message });
+      const message = String(error?.message || "");
+      const isAuthError =
+        error?.status === 401 ||
+        message.toLowerCase().includes("api key") ||
+        message.toLowerCase().includes("authorization");
+      res.status(isAuthError ? 503 : 500).json({
+        error: isAuthError
+          ? "AI insight is not available right now. Please check the AI key and URL, then try again."
+          : "AI insight could not be generated right now. Please try again.",
+      });
     }
   });
 
