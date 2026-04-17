@@ -171,6 +171,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
         }
 
+        function readScore(score: any): number | null {
+          const value = Number(score?.current ?? score?.display ?? score?.normaltime);
+          return Number.isFinite(value) ? value : null;
+        }
+
+        function calculateTeamForm(events: any[], teamId: number) {
+          const results = events
+            .map((event: any) => {
+              const side = getTeamSide(event, teamId);
+              if (!side) return null;
+              const homeScore = readScore(event.homeScore);
+              const awayScore = readScore(event.awayScore);
+              if (homeScore === null || awayScore === null) return null;
+              const goalsFor = side === "home" ? homeScore : awayScore;
+              const goalsAgainst = side === "home" ? awayScore : homeScore;
+              const margin = goalsFor - goalsAgainst;
+              const isWin = margin > 0;
+              const isDraw = margin === 0;
+              const isCleanSheet = goalsAgainst === 0;
+              const isNilNil = goalsFor === 0 && goalsAgainst === 0;
+              let points = isWin ? 3 : isDraw ? 1 : 0;
+              if (isWin && margin >= 2) points += 2;
+              if (isCleanSheet) points += 1;
+              if (isDraw) points -= 1;
+              if (isNilNil) points -= 1;
+              return {
+                points,
+                goalsFor,
+                goalsAgainst,
+                result: isWin ? "W" : isDraw ? "D" : "L",
+                cleanSheet: isCleanSheet,
+                margin,
+              };
+            })
+            .filter(Boolean) as {
+              points: number;
+              goalsFor: number;
+              goalsAgainst: number;
+              result: "W" | "D" | "L";
+              cleanSheet: boolean;
+              margin: number;
+            }[];
+
+          const matches = results.length;
+          const totalPoints = results.reduce((sum, result) => sum + result.points, 0);
+          const goalsFor = results.reduce((sum, result) => sum + result.goalsFor, 0);
+          const goalsAgainst = results.reduce((sum, result) => sum + result.goalsAgainst, 0);
+          const cleanSheets = results.filter((result) => result.cleanSheet).length;
+          const bigWins = results.filter((result) => result.margin >= 2).length;
+          const goalsForPerMatch = matches > 0 ? goalsFor / matches : 0;
+          const goalsAgainstPerMatch = matches > 0 ? goalsAgainst / matches : 0;
+          const cleanSheetRate = matches > 0 ? cleanSheets / matches : 0;
+          const scoringRate = matches > 0 ? results.filter((result) => result.goalsFor > 0).length / matches : 0;
+
+          return {
+            formPoints: totalPoints,
+            formStrength: matches > 0 ? round1(clamp(4 + (totalPoints / (matches * 6)) * 6, 3, 10)) : null,
+            scoringStrength: matches > 0 ? round1(clamp(4 + (goalsForPerMatch / 2.5) * 4 + scoringRate * 1.2 + (bigWins / matches) * 0.8, 3, 10)) : null,
+            defendingStrength: matches > 0 ? round1(clamp(4 + cleanSheetRate * 3.4 + Math.max(0, 2 - goalsAgainstPerMatch) * 1.3, 3, 10)) : null,
+            goalsFor,
+            goalsAgainst,
+            cleanSheets,
+            matches,
+            recentForm: results.slice(0, 5).map((result) => result.result),
+          };
+        }
+
         function readRating(entry: any): number | null {
           const value = Number(entry.statistics?.rating ?? entry.avgRating);
           return Number.isFinite(value) && value > 0 ? value : null;
@@ -485,6 +552,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         function average(values: number[]): number | null {
           return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+        }
+
+        function readScore(score: any): number | null {
+          const value = Number(score?.current ?? score?.display ?? score?.normaltime);
+          return Number.isFinite(value) ? value : null;
+        }
+
+        function calculateTeamForm(events: any[], teamId: number) {
+          const results = events
+            .map((event: any) => {
+              const side = getTeamSide(event, teamId);
+              if (!side) return null;
+              const homeScore = readScore(event.homeScore);
+              const awayScore = readScore(event.awayScore);
+              if (homeScore === null || awayScore === null) return null;
+              const goalsFor = side === "home" ? homeScore : awayScore;
+              const goalsAgainst = side === "home" ? awayScore : homeScore;
+              const margin = goalsFor - goalsAgainst;
+              const isWin = margin > 0;
+              const isDraw = margin === 0;
+              const isCleanSheet = goalsAgainst === 0;
+              const isNilNil = goalsFor === 0 && goalsAgainst === 0;
+              let points = isWin ? 3 : isDraw ? 1 : 0;
+              if (isWin && margin >= 2) points += 2;
+              if (isCleanSheet) points += 1;
+              if (isDraw) points -= 1;
+              if (isNilNil) points -= 1;
+              return {
+                points,
+                goalsFor,
+                goalsAgainst,
+                result: isWin ? "W" : isDraw ? "D" : "L",
+                cleanSheet: isCleanSheet,
+                margin,
+              };
+            })
+            .filter(Boolean) as {
+              points: number;
+              goalsFor: number;
+              goalsAgainst: number;
+              result: "W" | "D" | "L";
+              cleanSheet: boolean;
+              margin: number;
+            }[];
+
+          const matches = results.length;
+          const totalPoints = results.reduce((sum, result) => sum + result.points, 0);
+          const goalsFor = results.reduce((sum, result) => sum + result.goalsFor, 0);
+          const goalsAgainst = results.reduce((sum, result) => sum + result.goalsAgainst, 0);
+          const cleanSheets = results.filter((result) => result.cleanSheet).length;
+          const bigWins = results.filter((result) => result.margin >= 2).length;
+          const goalsForPerMatch = matches > 0 ? goalsFor / matches : 0;
+          const goalsAgainstPerMatch = matches > 0 ? goalsAgainst / matches : 0;
+          const cleanSheetRate = matches > 0 ? cleanSheets / matches : 0;
+          const scoringRate = matches > 0 ? results.filter((result) => result.goalsFor > 0).length / matches : 0;
+
+          return {
+            formPoints: totalPoints,
+            formStrength: matches > 0 ? round1(clamp(4 + (totalPoints / (matches * 6)) * 6, 3, 10)) : null,
+            scoringStrength: matches > 0 ? round1(clamp(4 + (goalsForPerMatch / 2.5) * 4 + scoringRate * 1.2 + (bigWins / matches) * 0.8, 3, 10)) : null,
+            defendingStrength: matches > 0 ? round1(clamp(4 + cleanSheetRate * 3.4 + Math.max(0, 2 - goalsAgainstPerMatch) * 1.3, 3, 10)) : null,
+            goalsFor,
+            goalsAgainst,
+            cleanSheets,
+            matches,
+            recentForm: results.slice(0, 5).map((result) => result.result),
+          };
         }
 
         function parseFormationParts(formation?: string): number[] {
@@ -847,6 +981,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const existingTeam = currentLineups?.[side];
           const hasProviderLineup = (existingTeam?.players || []).some((entry: any) => !entry.substitute);
           const team = hasProviderLineup ? existingTeam : buildLikelyLineup(side, events, teamId, history);
+          const teamForm = calculateTeamForm(events, teamId);
           const players = (team?.players || []).map((entry: any) => {
             const playerId = Number(entry.player?.id);
             return {
@@ -903,6 +1038,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             activeLast5Count: team?.activeLast5Count || 0,
             players,
             teamStrength,
+            formStrength: teamForm.formStrength,
+            scoringStrength: teamForm.scoringStrength,
+            defendingStrength: teamForm.defendingStrength,
+            formPoints: teamForm.formPoints,
+            formSummary: teamForm,
             phaseStrengths: {
               defensiveStrength: averageRole(roleScores.defensiveStrength),
               attackStrength: averageRole(roleScores.attackStrength),

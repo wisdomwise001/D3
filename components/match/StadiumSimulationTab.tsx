@@ -72,6 +72,18 @@ interface PhaseStrengths {
   fullbackStrength: number | null;
 }
 
+interface FormSummary {
+  formStrength: number | null;
+  scoringStrength: number | null;
+  defendingStrength: number | null;
+  formPoints: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  cleanSheets: number;
+  matches: number;
+  recentForm: ("W" | "D" | "L")[];
+}
+
 interface SimulationMetricsResponse {
   home?: {
     formation?: string | null;
@@ -83,6 +95,11 @@ interface SimulationMetricsResponse {
     };
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
+    formStrength?: number | null;
+    scoringStrength?: number | null;
+    defendingStrength?: number | null;
+    formPoints?: number;
+    formSummary?: FormSummary;
     phaseStrengths?: PhaseStrengths;
     isLikelyLineup?: boolean;
     lineupSource?: string;
@@ -100,6 +117,11 @@ interface SimulationMetricsResponse {
     };
     players?: { playerId: number; metrics: PlayerMetrics }[];
     teamStrength?: number | null;
+    formStrength?: number | null;
+    scoringStrength?: number | null;
+    defendingStrength?: number | null;
+    formPoints?: number;
+    formSummary?: FormSummary;
     phaseStrengths?: PhaseStrengths;
     isLikelyLineup?: boolean;
     lineupSource?: string;
@@ -329,6 +351,8 @@ function buildSimulationContext({
   awayStrength,
   homePhases,
   awayPhases,
+  homeForm,
+  awayForm,
 }: {
   homePlayers: PlayerData[];
   awayPlayers: PlayerData[];
@@ -336,9 +360,17 @@ function buildSimulationContext({
   awayStrength?: number | null;
   homePhases?: PhaseStrengths;
   awayPhases?: PhaseStrengths;
+  homeForm?: FormSummary;
+  awayForm?: FormSummary;
 }) {
-  const homePower = ((homePhases?.attackStrength || homeStrength || 6.4) * 0.55) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.25) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.2);
-  const awayPower = ((awayPhases?.attackStrength || awayStrength || 6.4) * 0.55) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.25) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.2);
+  const homeScoring = homeForm?.scoringStrength || homePhases?.attackStrength || homeStrength || 6.4;
+  const awayScoring = awayForm?.scoringStrength || awayPhases?.attackStrength || awayStrength || 6.4;
+  const homeDefending = homeForm?.defendingStrength || homePhases?.defensiveStrength || homeStrength || 6.4;
+  const awayDefending = awayForm?.defendingStrength || awayPhases?.defensiveStrength || awayStrength || 6.4;
+  const homeFormBoost = homeForm?.formStrength || homeStrength || 6.4;
+  const awayFormBoost = awayForm?.formStrength || awayStrength || 6.4;
+  const homePower = (homeScoring * 0.48) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.2) + ((homePhases?.fullbackStrength || homeStrength || 6.4) * 0.12) + (homeFormBoost * 0.2);
+  const awayPower = (awayScoring * 0.48) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.2) + ((awayPhases?.fullbackStrength || awayStrength || 6.4) * 0.12) + (awayFormBoost * 0.2);
   const totalPower = Math.max(homePower + awayPower, 1);
   const homeChance = homePower / totalPower;
 
@@ -354,8 +386,10 @@ function buildSimulationContext({
     homeDefenseScores: homeDefenseScores.length ? homeDefenseScores : [6],
     awayAttackScores: awayAttackScores.length ? awayAttackScores : [6],
     awayDefenseScores: awayDefenseScores.length ? awayDefenseScores : [6],
-    homeDefensiveBase: ((homePhases?.defensiveStrength || homeStrength || 6.4) * 0.5) + ((homePhases?.keeperStrength || homeStrength || 6.4) * 0.3) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.2),
-    awayDefensiveBase: ((awayPhases?.defensiveStrength || awayStrength || 6.4) * 0.5) + ((awayPhases?.keeperStrength || awayStrength || 6.4) * 0.3) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.2),
+    homeScoringBase: homeScoring,
+    awayScoringBase: awayScoring,
+    homeDefensiveBase: (homeDefending * 0.48) + ((homePhases?.keeperStrength || homeStrength || 6.4) * 0.28) + ((homePhases?.midfieldStrength || homeStrength || 6.4) * 0.16) + (homeFormBoost * 0.08),
+    awayDefensiveBase: (awayDefending * 0.48) + ((awayPhases?.keeperStrength || awayStrength || 6.4) * 0.28) + ((awayPhases?.midfieldStrength || awayStrength || 6.4) * 0.16) + (awayFormBoost * 0.08),
   };
 }
 
@@ -372,7 +406,8 @@ function simulateMatchScoreline(context: ReturnType<typeof buildSimulationContex
     const defensiveWall = attackingTeam === "home"
       ? context.awayDefensiveBase || defenderScore
       : context.homeDefensiveBase || defenderScore;
-    const goalChance = clampForSimulation(0.05 + (attackerScore - defensiveWall) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.025, 0.17);
+    const scoringBase = attackingTeam === "home" ? context.homeScoringBase : context.awayScoringBase;
+    const goalChance = clampForSimulation(0.045 + (attackerScore * 0.65 + scoringBase * 0.35 - defensiveWall) * 0.026 + (attackingTeam === "home" ? 0.01 : 0), 0.022, 0.18);
 
     if (Math.random() < goalChance) {
       if (attackingTeam === "home") homeScore += 1;
@@ -415,6 +450,8 @@ function SimulationPanel({
   awayStrength,
   homePhases,
   awayPhases,
+  homeForm,
+  awayForm,
 }: {
   homeTeamName: string;
   awayTeamName: string;
@@ -424,6 +461,8 @@ function SimulationPanel({
   awayStrength?: number | null;
   homePhases?: PhaseStrengths;
   awayPhases?: PhaseStrengths;
+  homeForm?: FormSummary;
+  awayForm?: FormSummary;
 }) {
   const [state, setState] = useState<SimulationState>({
     running: false,
@@ -446,8 +485,10 @@ function SimulationPanel({
         awayStrength,
         homePhases,
         awayPhases,
+        homeForm,
+        awayForm,
       }),
-    [awayPhases, awayPlayers, awayStrength, homePhases, homePlayers, homeStrength],
+    [awayForm, awayPhases, awayPlayers, awayStrength, homeForm, homePhases, homePlayers, homeStrength],
   );
 
   const resetSimulation = useCallback(() => {
@@ -496,7 +537,8 @@ function SimulationPanel({
         const attackerScore = Math.max(getPlayerScore(attacker), getRoleStrength(attacker));
         const defenderScore = Math.max(getPlayerScore(defender), getRoleStrength(defender));
         const defensiveWall = attackingTeam === "home" ? simulationContext.awayDefensiveBase : simulationContext.homeDefensiveBase;
-        const goalChance = clampForSimulation(0.05 + (attackerScore - defensiveWall) * 0.025 + (attackingTeam === "home" ? 0.01 : 0), 0.025, 0.17);
+        const scoringBase = attackingTeam === "home" ? simulationContext.homeScoringBase : simulationContext.awayScoringBase;
+        const goalChance = clampForSimulation(0.045 + (attackerScore * 0.65 + scoringBase * 0.35 - defensiveWall) * 0.026 + (attackingTeam === "home" ? 0.01 : 0), 0.022, 0.18);
         const roll = Math.random();
         const type: LiveEvent["type"] =
           roll < goalChance ? "goal" : roll < goalChance + 0.22 ? "save" : roll < 0.68 ? "attack" : "control";
@@ -663,6 +705,56 @@ function PhaseStrengthCard({
   );
 }
 
+function FormStrengthCard({
+  homeTeamName,
+  awayTeamName,
+  homeForm,
+  awayForm,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeForm?: FormSummary;
+  awayForm?: FormSummary;
+}) {
+  const rows: { label: string; getValue: (form?: FormSummary) => number | null | undefined; note: string }[] = [
+    { label: "Form", getValue: (form) => form?.formStrength, note: "3 win, 1 draw, 0 loss, +2 big win, +1 clean sheet, -1 draw/0-0" },
+    { label: "Scoring", getValue: (form) => form?.scoringStrength, note: "goals per match, scoring rate, and two-goal-margin wins" },
+    { label: "Defending", getValue: (form) => form?.defendingStrength, note: "goals conceded per match and clean-sheet rate" },
+  ];
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Recent form strengths</Text>
+      {rows.map((row) => {
+        const homeValue = row.getValue(homeForm) ?? null;
+        const awayValue = row.getValue(awayForm) ?? null;
+        return (
+          <View key={row.label} style={styles.phaseRow}>
+            <View style={styles.phaseHeader}>
+              <Text style={styles.phaseLabel}>{row.label}</Text>
+              <Text style={styles.phaseNote} numberOfLines={1}>{row.note}</Text>
+            </View>
+            <View style={styles.phaseScores}>
+              <Text style={[styles.phaseScore, { color: metricColor(homeValue) }]}>
+                {homeTeamName}: {metricLabel(homeValue)}
+              </Text>
+              <Text style={[styles.phaseScore, { color: metricColor(awayValue) }]}>
+                {awayTeamName}: {metricLabel(awayValue)}
+              </Text>
+            </View>
+          </View>
+        );
+      })}
+      <Text style={styles.formDetailText}>
+        {homeTeamName}: {homeForm?.formPoints ?? 0} pts · {homeForm?.goalsFor ?? 0}-{homeForm?.goalsAgainst ?? 0} · CS {homeForm?.cleanSheets ?? 0} · {(homeForm?.recentForm || []).join(" ") || "—"}
+      </Text>
+      <Text style={styles.formDetailText}>
+        {awayTeamName}: {awayForm?.formPoints ?? 0} pts · {awayForm?.goalsFor ?? 0}-{awayForm?.goalsAgainst ?? 0} · CS {awayForm?.cleanSheets ?? 0} · {(awayForm?.recentForm || []).join(" ") || "—"}
+      </Text>
+    </View>
+  );
+}
+
 function clampForSimulation(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -795,6 +887,13 @@ function StadiumSimulationTab({
         awayPhases={simulationMetrics?.away?.phaseStrengths}
       />
 
+      <FormStrengthCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeForm={simulationMetrics?.home?.formSummary}
+        awayForm={simulationMetrics?.away?.formSummary}
+      />
+
       <SimulationPanel
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
@@ -804,6 +903,8 @@ function StadiumSimulationTab({
         awayStrength={simulationMetrics?.away?.teamStrength}
         homePhases={simulationMetrics?.home?.phaseStrengths}
         awayPhases={simulationMetrics?.away?.phaseStrengths}
+        homeForm={simulationMetrics?.home?.formSummary}
+        awayForm={simulationMetrics?.away?.formSummary}
       />
 
       <View style={{ height: 32 }} />
@@ -1016,6 +1117,12 @@ const styles = StyleSheet.create({
     textShadowColor: "rgba(0, 0, 0, 0.7)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  formDetailText: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+    marginTop: 6,
   },
   centerSpacer: {
     height: 16,
