@@ -200,7 +200,7 @@ function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void
             home={h("phase_fullback")} away={a("phase_fullback")} />
 
           {/* ── Form strengths ── */}
-          <SectionHeader label="Recent Form Strengths" />
+          <SectionHeader label="Last 7 Matches Form Strengths" />
           <StrengthRow label="Form" note="3 win · 1 draw · 0 loss · +2 big win · +1 CS · -1 draw/0-0"
             home={h("form_strength")} away={a("form_strength")} />
           <StrengthRow label="Scoring" note="goals per match, scoring rate, big-win margin"
@@ -265,6 +265,11 @@ function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void
           <CmpRow label="GK Saves" home={fmt(h("avg_goalkeeper_saves"))} away={fmt(a("avg_goalkeeper_saves"))} />
           <CmpRow label="Goals Prevented" home={fmt(h("avg_goals_prevented"))} away={fmt(a("avg_goals_prevented"))} />
 
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Last 15 Matches Totals</Text></View>
+          <CmpRow label="Total Goals Scored" home={h("goals_for") != null ? String(h("goals_for")) : "—"} away={a("goals_for") != null ? String(a("goals_for")) : "—"} highlight />
+          <CmpRow label="Total Goals Conceded" home={h("goals_against") != null ? String(h("goals_against")) : "—"} away={a("goals_against") != null ? String(a("goals_against")) : "—"} />
+          <CmpRow label="Total Clean Sheets" home={h("clean_sheets") != null ? String(h("clean_sheets")) : "—"} away={a("clean_sheets") != null ? String(a("clean_sheets")) : "—"} />
+
           {/* Delete */}
           <TouchableOpacity onPress={confirmDelete} style={styles.deleteBtn} activeOpacity={0.7}>
             <Ionicons name="trash-outline" size={14} color="#f87171" />
@@ -320,6 +325,34 @@ export default function DatabaseScreen() {
     },
   });
 
+  const clearAllMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(new URL("/api/database/clear-all", base()).href, { method: "DELETE" });
+      if (!res.ok) throw new Error("Clear failed");
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/database/matches"] });
+      qc.invalidateQueries({ queryKey: ["/api/database/stats"] });
+    },
+  });
+
+  function confirmClearAll() {
+    if (Platform.OS === "web") {
+      if (window.confirm("Are you sure you want to delete ALL records from the database? This action cannot be undone.")) {
+        clearAllMutation.mutate();
+      }
+    } else {
+      Alert.alert(
+        "Clear Entire Database",
+        "This will permanently delete ALL stored match records. This action cannot be undone.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Delete All", style: "destructive", onPress: () => clearAllMutation.mutate() },
+        ]
+      );
+    }
+  }
+
   const matches = data?.matches || [];
   const total = stats?.total ?? 0;
   const homeWins = stats?.byResult.find((r) => r.result === "H")?.c ?? 0;
@@ -332,8 +365,24 @@ export default function DatabaseScreen() {
   return (
     <View style={[styles.container, { paddingTop: topPad }]}>
       <View style={styles.header}>
-        <Text style={styles.title}>Database</Text>
-        <Text style={styles.subtitle}>{total} matches stored</Text>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.title}>Database</Text>
+            <Text style={styles.subtitle}>{total} matches stored</Text>
+          </View>
+          {total > 0 && (
+            <TouchableOpacity onPress={confirmClearAll} style={styles.clearAllBtn} activeOpacity={0.7} disabled={clearAllMutation.isPending}>
+              {clearAllMutation.isPending ? (
+                <ActivityIndicator size="small" color="#f87171" />
+              ) : (
+                <>
+                  <Ionicons name="trash-outline" size={14} color="#f87171" />
+                  <Text style={styles.clearAllBtnText}>Clear All</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {total > 0 && (
@@ -400,8 +449,15 @@ export default function DatabaseScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0f0f0f" },
   header: { paddingHorizontal: 20, paddingVertical: 12 },
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   title: { fontSize: 24, fontWeight: "700", color: "#f9fafb" },
   subtitle: { fontSize: 13, color: "#6b7280", marginTop: 2 },
+  clearAllBtn: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    backgroundColor: "#2d1212", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8,
+    borderWidth: 1, borderColor: "#7f1d1d",
+  },
+  clearAllBtnText: { fontSize: 13, fontWeight: "600", color: "#f87171" },
 
   summaryRow: { flexDirection: "row", paddingHorizontal: 14, gap: 8, marginBottom: 8 },
   summaryBadge: { flex: 1, borderRadius: 10, padding: 10, alignItems: "center" },

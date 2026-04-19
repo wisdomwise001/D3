@@ -301,7 +301,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             goalsAgainst,
             cleanSheets,
             matches,
-            recentForm: results.slice(0, 8).map((result) => result.result),
+            recentForm: results.slice(0, 7).map((result) => result.result),
           };
         }
 
@@ -879,7 +879,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             goalsAgainst,
             cleanSheets,
             matches,
-            recentForm: results.slice(0, 8).map((result) => result.result),
+            recentForm: results.slice(0, 7).map((result) => result.result),
           };
         }
 
@@ -1892,6 +1892,16 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
       const info = db.prepare("DELETE FROM match_simulations WHERE event_id = ?").run(Number(req.params.eventId));
       if (info.changes === 0) return res.status(404).json({ error: "Not found" });
       res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ─── Database: clear all records ──────────────────────────────────────────
+  app.delete("/api/database/clear-all", (_req: Request, res: Response) => {
+    try {
+      const info = db.prepare("DELETE FROM match_simulations").run();
+      res.json({ success: true, deleted: info.changes });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
