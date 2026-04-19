@@ -350,6 +350,94 @@ function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void
           <CmpRow label="Pass Accuracy" home={item.home_h2_avg_pass_accuracy != null ? fmtPct(item.home_h2_avg_pass_accuracy) : "—"} away={item.away_h2_avg_pass_accuracy != null ? fmtPct(item.away_h2_avg_pass_accuracy) : "—"} />
           <CmpRow label="Total Passes" home={fmt(item.home_h2_avg_total_passes, 0)} away={fmt(item.away_h2_avg_total_passes, 0)} />
 
+          {/* ── Injury / Suspension Report ── */}
+          {(() => {
+            const homeInjured: any[] = (() => { try { return JSON.parse(item.home_injured_players || "[]"); } catch { return []; } })();
+            const awayInjured: any[] = (() => { try { return JSON.parse(item.away_injured_players || "[]"); } catch { return []; } })();
+            const homeSuspended: any[] = (() => { try { return JSON.parse(item.home_suspended_players || "[]"); } catch { return []; } })();
+            const awaySuspended: any[] = (() => { try { return JSON.parse(item.away_suspended_players || "[]"); } catch { return []; } })();
+            const homeImpact = item.home_injury_impact ?? 0;
+            const awayImpact = item.away_injury_impact ?? 0;
+            const hasAnyData =
+              homeInjured.length > 0 || awayInjured.length > 0 ||
+              homeSuspended.length > 0 || awaySuspended.length > 0;
+            if (!hasAnyData) return null;
+            const renderPlayerList = (list: any[], accentColor: string) =>
+              list.map((p: any, i: number) => (
+                <View key={i} style={styles.missingPlayerRow}>
+                  <View style={[styles.keyPlayerDot, { backgroundColor: p.isKeyPlayer ? accentColor : "#374151" }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.missingPlayerName, p.isKeyPlayer && { color: accentColor }]} numberOfLines={1}>
+                      {p.name}
+                      {p.isKeyPlayer ? " ★" : ""}
+                    </Text>
+                    <Text style={styles.missingPlayerMeta}>
+                      {p.position || "—"}{p.last5Rating != null ? ` · L5 Rtg: ${p.last5Rating}` : p.avgRating != null ? ` · Rtg: ${p.avgRating}` : ""}{p.last5Appearances > 0 ? ` · ${p.last5Appearances}/5 apps` : ""}
+                    </Text>
+                  </View>
+                </View>
+              ));
+            return (
+              <View>
+                <SectionHeader label="Injury & Suspension Report" />
+                <View style={styles.injuryImpactRow}>
+                  <View style={styles.injuryImpactSide}>
+                    <Text style={styles.injuryImpactLabel}>Home Impact</Text>
+                    <Text style={[styles.injuryImpactValue, { color: homeImpact > 3 ? "#f87171" : homeImpact > 1.5 ? "#facc15" : "#4ade80" }]}>
+                      {homeImpact > 0 ? homeImpact.toFixed(1) : "None"}
+                    </Text>
+                  </View>
+                  <View style={styles.injuryImpactDivider} />
+                  <View style={styles.injuryImpactSide}>
+                    <Text style={styles.injuryImpactLabel}>Away Impact</Text>
+                    <Text style={[styles.injuryImpactValue, { color: awayImpact > 3 ? "#f87171" : awayImpact > 1.5 ? "#facc15" : "#4ade80" }]}>
+                      {awayImpact > 0 ? awayImpact.toFixed(1) : "None"}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.injuryColumns}>
+                  <View style={styles.injuryCol}>
+                    <Text style={styles.injuryColHeader} numberOfLines={1}>{item.home_team_name}</Text>
+                    {homeInjured.length > 0 && (
+                      <>
+                        <Text style={styles.injuryTypeLabel}>Injuries ({homeInjured.length})</Text>
+                        {renderPlayerList(homeInjured, "#f87171")}
+                      </>
+                    )}
+                    {homeSuspended.length > 0 && (
+                      <>
+                        <Text style={[styles.injuryTypeLabel, { color: "#fb923c" }]}>Suspensions ({homeSuspended.length})</Text>
+                        {renderPlayerList(homeSuspended, "#fb923c")}
+                      </>
+                    )}
+                    {homeInjured.length === 0 && homeSuspended.length === 0 && (
+                      <Text style={styles.noMissingText}>No absences recorded</Text>
+                    )}
+                  </View>
+                  <View style={styles.injuryColDivider} />
+                  <View style={styles.injuryCol}>
+                    <Text style={[styles.injuryColHeader, { color: "#f87171" }]} numberOfLines={1}>{item.away_team_name}</Text>
+                    {awayInjured.length > 0 && (
+                      <>
+                        <Text style={styles.injuryTypeLabel}>Injuries ({awayInjured.length})</Text>
+                        {renderPlayerList(awayInjured, "#f87171")}
+                      </>
+                    )}
+                    {awaySuspended.length > 0 && (
+                      <>
+                        <Text style={[styles.injuryTypeLabel, { color: "#fb923c" }]}>Suspensions ({awaySuspended.length})</Text>
+                        {renderPlayerList(awaySuspended, "#fb923c")}
+                      </>
+                    )}
+                    {awayInjured.length === 0 && awaySuspended.length === 0 && (
+                      <Text style={styles.noMissingText}>No absences recorded</Text>
+                    )}
+                  </View>
+                </View>
+              </View>
+            );
+          })()}
+
           {/* Delete */}
           <TouchableOpacity onPress={confirmDelete} style={styles.deleteBtn} activeOpacity={0.7}>
             <Ionicons name="trash-outline" size={14} color="#f87171" />
@@ -641,6 +729,33 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: "#7f1d1d",
   },
   deleteBtnText: { fontSize: 12, color: "#f87171", fontWeight: "600" },
+
+  // Injury / suspension
+  injuryImpactRow: {
+    flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10,
+    backgroundColor: "#0a0f1a", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#1f2937",
+  },
+  injuryImpactSide: { flex: 1, alignItems: "center" },
+  injuryImpactDivider: { width: 1, height: 32, backgroundColor: "#1f2937" },
+  injuryImpactLabel: { fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 3 },
+  injuryImpactValue: { fontSize: 18, fontWeight: "700" },
+  injuryColumns: { flexDirection: "row", paddingHorizontal: 0 },
+  injuryCol: { flex: 1, padding: 10, paddingTop: 8 },
+  injuryColDivider: { width: 1, backgroundColor: "#1f2937" },
+  injuryColHeader: {
+    fontSize: 11, fontWeight: "700", color: "#60a5fa",
+    marginBottom: 6, textAlign: "center",
+  },
+  injuryTypeLabel: {
+    fontSize: 10, fontWeight: "600", color: "#f87171",
+    textTransform: "uppercase", letterSpacing: 0.4,
+    marginBottom: 4, marginTop: 6,
+  },
+  missingPlayerRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginBottom: 5 },
+  keyPlayerDot: { width: 7, height: 7, borderRadius: 4, marginTop: 4 },
+  missingPlayerName: { fontSize: 12, fontWeight: "600", color: "#d1d5db" },
+  missingPlayerMeta: { fontSize: 10, color: "#6b7280", marginTop: 1 },
+  noMissingText: { fontSize: 11, color: "#374151", fontStyle: "italic", marginTop: 4 },
 
   // Match summary
   matchSummaryBox: { backgroundColor: "#080d18" },

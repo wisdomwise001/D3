@@ -81,8 +81,10 @@ export const FEATURE_NAMES = [
   "home_h2_avg_total_shots", "away_h2_avg_total_shots",
   "home_h2_avg_possession", "away_h2_avg_possession",
   "home_h2_avg_pass_accuracy", "away_h2_avg_pass_accuracy",
+  // ── Injury / suspension impact (key player absences) ───────────────────────
+  "home_injury_impact", "away_injury_impact",
 ];
-export const N_FEATURES = FEATURE_NAMES.length; // 92
+export const N_FEATURES = FEATURE_NAMES.length; // 94
 
 export const TARGET_NAMES = [
   "home_ft_xg", "away_ft_xg",

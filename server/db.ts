@@ -160,7 +160,15 @@ db.exec(`
     away_h2_avg_pass_accuracy   REAL,
     away_h2_avg_total_passes    REAL,
 
-    processed_at                TEXT NOT NULL
+    processed_at                TEXT NOT NULL,
+
+    -- Injury / suspension reports (JSON arrays)
+    home_injured_players        TEXT,
+    away_injured_players        TEXT,
+    home_suspended_players      TEXT,
+    away_suspended_players      TEXT,
+    home_injury_impact          REAL,
+    away_injury_impact          REAL
   )
 `);
 
@@ -237,5 +245,12 @@ col("away_h2_avg_big_chances", "REAL");
 col("away_h2_avg_total_shots", "REAL");
 col("away_h2_avg_pass_accuracy", "REAL");
 col("away_h2_avg_total_passes", "REAL");
+// Injury / suspension columns
+col("home_injured_players", "TEXT");
+col("away_injured_players", "TEXT");
+col("home_suspended_players", "TEXT");
+col("away_suspended_players", "TEXT");
+col("home_injury_impact", "REAL");
+col("away_injury_impact", "REAL");
 
 export default db;

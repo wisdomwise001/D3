@@ -1318,6 +1318,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
           };
           const averageRole = (values: number[]) => (values.length > 0 ? round1(values.reduce((sum, value) => sum + value, 0) / values.length) : null);
 
+          // ── Injury / suspension report ──────────────────────────────────
+          const rawMissing: any[] = currentLineups?.[side]?.missingPlayers || [];
+          const injuryReport = rawMissing.map((entry: any) => {
+            const pid = Number(entry.player?.id);
+            const ph = history.get(pid);
+            const avgRating =
+              ph && ph.ratings.length > 0
+                ? round1(ph.ratings.reduce((s: number, r: number) => s + r, 0) / ph.ratings.length)
+                : null;
+            const last5Rating =
+              ph && ph.recentRatings.length > 0
+                ? round1(ph.recentRatings.reduce((s: number, r: number) => s + r, 0) / ph.recentRatings.length)
+                : null;
+            const effectiveRating = last5Rating ?? avgRating ?? 0;
+            const isKeyPlayer = effectiveRating >= 7.0 && (ph?.last5Appearances ?? 0) >= 1;
+            const typeStr = `${entry.type || ""} ${entry.reason || ""}`.toLowerCase();
+            const isSuspended =
+              typeStr.includes("suspend") || typeStr.includes("card") || typeStr.includes("ban");
+            return {
+              name: entry.player?.shortName || entry.player?.name || "Unknown",
+              type: isSuspended ? "suspension" : "injury",
+              reason: entry.reason || entry.type || "Unavailable",
+              avgRating,
+              last5Rating,
+              isKeyPlayer,
+              position: ph?.position || "",
+              last5Appearances: ph?.last5Appearances ?? 0,
+              last5Starts: ph?.last5Starts ?? 0,
+            };
+          });
+          const keyMissing = injuryReport.filter((p: any) => p.isKeyPlayer);
+          const injuryImpact =
+            keyMissing.length > 0
+              ? round1(
+                  Math.min(
+                    keyMissing.reduce(
+                      (sum: number, p: any) => sum + (p.last5Rating ?? p.avgRating ?? 7),
+                      0,
+                    ) /
+                      keyMissing.length *
+                      0.7 +
+                      keyMissing.length * 0.5,
+                    10,
+                  ),
+                )
+              : 0;
+          const injuredList = injuryReport.filter((p: any) => p.type === "injury");
+          const suspendedList = injuryReport.filter((p: any) => p.type === "suspension");
+
           return {
             formation: team?.formation || null,
             lineup: team,
@@ -1340,6 +1389,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
               fullbackStrength: averageRole(roleScores.fullbackStrength),
             },
             matchesAnalyzed: side === "home" ? homeLast15.length : awayLast15.length,
+            injuredPlayers: injuredList,
+            suspendedPlayers: suspendedList,
+            injuryImpact,
           };
         }
 
@@ -2177,7 +2229,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
         query += " AND sport = ?";
         params.push(sport);
       }
-      query += " ORDER BY start_timestamp DESC LIMIT ? OFFSET ?";
+      query += " ORDER BY processed_at DESC LIMIT ? OFFSET ?";
       params.push(Number(limit), Number(offset));
       const rows = db.prepare(query).all(...params);
       const countQuery = query.replace(/SELECT \*/, "SELECT COUNT(*) as total").replace(/ORDER BY.*/, "");
@@ -2333,6 +2385,26 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const hForm = h?.formSummary;
             const aForm = a?.formSummary;
 
+            // ── Incomplete data check ────────────────────────────────────────
+            // Skip matches where both teams have fewer than 3 matches with
+            // detailed statistics (xG, possession, shots, etc. would all be "—")
+            const hWithStats = hStats?.matchesWithStats ?? 0;
+            const aWithStats = aStats?.matchesWithStats ?? 0;
+            if (hWithStats < 3 && aWithStats < 3) {
+              job.skipped++;
+              job.processed++;
+              job.log.push(`⏭ Skipped (incomplete stats — ${hWithStats}/${aWithStats} matches with data): ${homeTeamName} vs ${awayTeamName}`);
+              continue;
+            }
+
+            // ── Injury / suspension data ─────────────────────────────────────
+            const hInjured = JSON.stringify(h?.injuredPlayers ?? []);
+            const aSuspended = JSON.stringify(a?.suspendedPlayers ?? []);
+            const hSuspended = JSON.stringify(h?.suspendedPlayers ?? []);
+            const aInjured = JSON.stringify(a?.injuredPlayers ?? []);
+            const hInjuryImpact = h?.injuryImpact ?? 0;
+            const aInjuryImpact = a?.injuryImpact ?? 0;
+
             db.prepare(`
               INSERT OR REPLACE INTO match_simulations (
                 event_id, home_team_id, home_team_name, away_team_id, away_team_name,
@@ -2361,7 +2433,10 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 home_h2_avg_goals_scored, home_h2_avg_goals_conceded, home_h2_avg_xg, home_h2_avg_possession, home_h2_avg_big_chances, home_h2_avg_total_shots, home_h2_avg_pass_accuracy, home_h2_avg_total_passes,
                 away_h1_avg_goals_scored, away_h1_avg_goals_conceded, away_h1_avg_xg, away_h1_avg_possession, away_h1_avg_big_chances, away_h1_avg_total_shots, away_h1_avg_pass_accuracy, away_h1_avg_total_passes,
                 away_h2_avg_goals_scored, away_h2_avg_goals_conceded, away_h2_avg_xg, away_h2_avg_possession, away_h2_avg_big_chances, away_h2_avg_total_shots, away_h2_avg_pass_accuracy, away_h2_avg_total_passes,
-                processed_at
+                processed_at,
+                home_injured_players, away_injured_players,
+                home_suspended_players, away_suspended_players,
+                home_injury_impact, away_injury_impact
               ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
@@ -2372,7 +2447,8 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 ?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?
               )
             `).run(
               eventId, homeTeamId, homeTeamName, awayTeamId, awayTeamName,
@@ -2404,10 +2480,18 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
               aStats1h?.avgGoalsScored ?? null, aStats1h?.avgGoalsConceded ?? null, aStats1h?.avgXg ?? null, aStats1h?.avgPossession ?? null, aStats1h?.avgBigChances ?? null, aStats1h?.avgTotalShots ?? null, aStats1h?.avgPassAccuracy ?? null, aStats1h?.avgTotalPasses ?? null,
               aStats2h?.avgGoalsScored ?? null, aStats2h?.avgGoalsConceded ?? null, aStats2h?.avgXg ?? null, aStats2h?.avgPossession ?? null, aStats2h?.avgBigChances ?? null, aStats2h?.avgTotalShots ?? null, aStats2h?.avgPassAccuracy ?? null, aStats2h?.avgTotalPasses ?? null,
               new Date().toISOString(),
+              hInjured, aInjured,
+              hSuspended, aSuspended,
+              hInjuryImpact, aInjuryImpact,
             );
 
             job.stored++;
-            job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} (${tournament})`);
+            const hKeyMissing = [...(h?.injuredPlayers ?? []), ...(h?.suspendedPlayers ?? [])].filter((p: any) => p.isKeyPlayer).length;
+            const aKeyMissing = [...(a?.injuredPlayers ?? []), ...(a?.suspendedPlayers ?? [])].filter((p: any) => p.isKeyPlayer).length;
+            const injuryNote = (hKeyMissing > 0 || aKeyMissing > 0)
+              ? ` | 🚑 Key absences: H${hKeyMissing} A${aKeyMissing}`
+              : "";
+            job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} (${tournament})${injuryNote}`);
           } catch (err: any) {
             job.failed++;
             job.log.push(`❌ Failed: ${homeTeamName} vs ${awayTeamName} — ${err.message}`);
