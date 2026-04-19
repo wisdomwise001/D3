@@ -258,6 +258,9 @@ export default function MatchDetailScreen() {
             eventId={eventId}
             homeTeamName={homeTeamName}
             awayTeamName={awayTeamName}
+            homeTeamId={homeTeamId || undefined}
+            awayTeamId={awayTeamId || undefined}
+            tournamentName={tournamentName || undefined}
           />
         )}
       </View>

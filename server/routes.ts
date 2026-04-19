@@ -1939,16 +1939,119 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   // ─── xG Engine: predict for stored match ──────────────────────────────────
   app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {
     try {
-      const row: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?")
-        .get(Number(req.params.eventId));
-      if (!row) return res.status(404).json({ error: "Match not found in database" });
+      const eventId = Number(req.params.eventId);
+
+      // 1. Try database first (completed matches already processed)
+      let row: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
+
+      // 2. If not in DB, build feature row on-the-fly from team history
+      if (!row) {
+        const homeTeamId = Number(req.query.homeTeamId);
+        const awayTeamId = Number(req.query.awayTeamId);
+        const homeTeamName = String(req.query.homeTeamName || "Home");
+        const awayTeamName = String(req.query.awayTeamName || "Away");
+
+        if (!homeTeamId || !awayTeamId) {
+          return res.status(404).json({ error: "Match not found in database. Provide homeTeamId and awayTeamId to predict for upcoming matches." });
+        }
+
+        // Fetch team stats via the player-simulation endpoint
+        const serverPort = process.env.PORT || 5000;
+        const baseUrl = `http://localhost:${serverPort}`;
+        const simRes = await fetch(
+          `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
+          { signal: AbortSignal.timeout(30000) }
+        );
+
+        if (!simRes.ok) {
+          const errText = await simRes.text();
+          return res.status(502).json({ error: `Failed to fetch team stats: ${errText}` });
+        }
+
+        const sim: any = await simRes.json();
+        const h = sim.home;
+        const a = sim.away;
+        const hStats = h?.teamMatchStats?.all;
+        const hStats1h = h?.teamMatchStats?.firstHalf;
+        const aStats = a?.teamMatchStats?.all;
+        const aStats1h = a?.teamMatchStats?.firstHalf;
+        const hPhase = h?.phaseStrengths;
+        const aPhase = a?.phaseStrengths;
+        const hForm = h?.formSummary;
+        const aForm = a?.formSummary;
+
+        // Build a synthetic feature row matching the match_simulations schema
+        row = {
+          event_id: eventId,
+          home_team_id: homeTeamId,
+          home_team_name: homeTeamName,
+          away_team_id: awayTeamId,
+          away_team_name: awayTeamName,
+          home_goals: null,
+          away_goals: null,
+          result: null,
+          match_date: new Date().toISOString().slice(0, 10),
+          tournament: String(req.query.tournamentName || ""),
+
+          home_phase_defensive: hPhase?.defensiveStrength ?? null,
+          home_phase_attack: hPhase?.attackStrength ?? null,
+          home_phase_midfield: hPhase?.midfieldStrength ?? null,
+          home_form_strength: h?.formStrength ?? null,
+          home_scoring_strength: h?.scoringStrength ?? null,
+          home_defending_strength: h?.defendingStrength ?? null,
+
+          home_avg_goals_scored: hStats?.avgGoalsScored ?? null,
+          home_avg_goals_conceded: hStats?.avgGoalsConceded ?? null,
+          home_avg_xg: hStats?.avgXg ?? null,
+          home_avg_possession: hStats?.avgPossession ?? null,
+          home_avg_big_chances: hStats?.avgBigChances ?? null,
+          home_avg_shots_on_target: hStats?.avgShotsOnTarget ?? null,
+          home_avg_shots_inside_box: hStats?.avgShotsInsideBox ?? null,
+          home_avg_pass_accuracy: hStats?.avgPassAccuracy ?? null,
+          home_avg_goalkeeper_saves: hStats?.avgGoalkeeperSaves ?? null,
+
+          home_h1_avg_goals_scored: hStats1h?.avgGoalsScored ?? null,
+          home_h1_avg_xg: hStats1h?.avgXg ?? null,
+          home_h1_avg_big_chances: hStats1h?.avgBigChances ?? null,
+          home_h1_avg_total_shots: hStats1h?.avgTotalShots ?? null,
+
+          away_phase_defensive: aPhase?.defensiveStrength ?? null,
+          away_phase_attack: aPhase?.attackStrength ?? null,
+          away_phase_midfield: aPhase?.midfieldStrength ?? null,
+          away_form_strength: a?.formStrength ?? null,
+          away_scoring_strength: a?.scoringStrength ?? null,
+          away_defending_strength: a?.defendingStrength ?? null,
+
+          away_avg_goals_scored: aStats?.avgGoalsScored ?? null,
+          away_avg_goals_conceded: aStats?.avgGoalsConceded ?? null,
+          away_avg_xg: aStats?.avgXg ?? null,
+          away_avg_possession: aStats?.avgPossession ?? null,
+          away_avg_big_chances: aStats?.avgBigChances ?? null,
+          away_avg_shots_on_target: aStats?.avgShotsOnTarget ?? null,
+          away_avg_shots_inside_box: aStats?.avgShotsInsideBox ?? null,
+          away_avg_pass_accuracy: aStats?.avgPassAccuracy ?? null,
+          away_avg_goalkeeper_saves: aStats?.avgGoalkeeperSaves ?? null,
+
+          away_h1_avg_goals_scored: aStats1h?.avgGoalsScored ?? null,
+          away_h1_avg_xg: aStats1h?.avgXg ?? null,
+          away_h1_avg_big_chances: aStats1h?.avgBigChances ?? null,
+          away_h1_avg_total_shots: aStats1h?.avgTotalShots ?? null,
+        };
+      }
+
       const prediction = await engine.predictFromRow(row);
-      res.json({ prediction, matchInfo: {
-        homeTeam: row.home_team_name, awayTeam: row.away_team_name,
-        homeGoals: row.home_goals, awayGoals: row.away_goals,
-        result: row.result, matchDate: row.match_date,
-        tournament: row.tournament,
-      }});
+      res.json({
+        prediction,
+        matchInfo: {
+          homeTeam: row.home_team_name,
+          awayTeam: row.away_team_name,
+          homeGoals: row.home_goals ?? null,
+          awayGoals: row.away_goals ?? null,
+          result: row.result ?? null,
+          matchDate: row.match_date,
+          tournament: row.tournament,
+        },
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

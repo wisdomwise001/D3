@@ -157,13 +157,27 @@ export default function XGEngineTab({
   eventId,
   homeTeamName,
   awayTeamName,
+  homeTeamId,
+  awayTeamId,
+  tournamentName,
 }: {
   eventId: string;
   homeTeamName: string;
   awayTeamName: string;
+  homeTeamId?: number;
+  awayTeamId?: number;
+  tournamentName?: string;
 }) {
+  const queryParts: string[] = [];
+  if (homeTeamId) queryParts.push(`homeTeamId=${homeTeamId}`);
+  if (awayTeamId) queryParts.push(`awayTeamId=${awayTeamId}`);
+  if (homeTeamName) queryParts.push(`homeTeamName=${encodeURIComponent(homeTeamName)}`);
+  if (awayTeamName) queryParts.push(`awayTeamName=${encodeURIComponent(awayTeamName)}`);
+  if (tournamentName) queryParts.push(`tournamentName=${encodeURIComponent(tournamentName)}`);
+  const queryUrl = `/api/engine/predict/${eventId}${queryParts.length ? `?${queryParts.join("&")}` : ""}`;
+
   const { data, isLoading, error, refetch } = useQuery<PredictionResponse>({
-    queryKey: [`/api/engine/predict/${eventId}`],
+    queryKey: [queryUrl],
     retry: false,
   });
 
@@ -178,19 +192,16 @@ export default function XGEngineTab({
 
   if (error || !data) {
     const msg = (error as any)?.message || "Prediction unavailable";
-    const notInDb = msg.includes("not found");
     const notTrained = msg.includes("not trained");
     return (
       <View style={styles.center}>
         <Ionicons name="analytics-outline" size={48} color={Colors.dark.textSecondary} />
         <Text style={styles.errorTitle}>
-          {notTrained ? "Engine Not Trained" : notInDb ? "Match Not in Database" : "Prediction Error"}
+          {notTrained ? "Engine Not Trained" : "Prediction Error"}
         </Text>
         <Text style={styles.errorMsg}>
           {notTrained
             ? "Train the xG Engine from the Engine tab first. The engine needs historical match data to learn from."
-            : notInDb
-            ? "This match hasn't been processed into the database yet. Use the Processing tab to add it."
             : msg}
         </Text>
         <TouchableOpacity style={styles.retryBtn} onPress={() => refetch()}>
