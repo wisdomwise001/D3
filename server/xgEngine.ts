@@ -1,13 +1,14 @@
 /**
  * Multi-Paradigm Probabilistic xG Forecasting Engine
  * Uses real ML libraries:
- *  - @tensorflow/tfjs  → ANN with Adam optimizer + proper backpropagation
+ *  - @tensorflow/tfjs-node → ANN with Adam optimizer + native C++ backend
  *  - ml-random-forest  → Random Forest with CART trees + bootstrap sampling
  *  - ml-cart           → CART decision trees for Gradient Boosting
  *  - ml-regression     → OLS MultivariateLinearRegression for Causal model
  *  - ml-matrix         → Matrix algebra for Gaussian Process
  */
 
+import "@tensorflow/tfjs-node";
 import * as tf from "@tensorflow/tfjs";
 import { RandomForestRegression } from "ml-random-forest";
 import { DecisionTreeRegression } from "ml-cart";
@@ -190,6 +191,19 @@ function annPredict(model: tf.LayersModel, x: number[]): number[] {
   const result = Array.from(output.dataSync()).map(v => Math.max(0, v));
   tensor.dispose();
   output.dispose();
+  return result;
+}
+
+function annPredictBatch(model: tf.LayersModel, xs: number[][]): number[][] {
+  const tensor = tf.tensor2d(xs);
+  const output = model.predict(tensor) as tf.Tensor;
+  const flat = Array.from(output.dataSync());
+  tensor.dispose();
+  output.dispose();
+  const result: number[][] = [];
+  for (let i = 0; i < xs.length; i++) {
+    result.push(flat.slice(i * N_TARGETS, (i + 1) * N_TARGETS).map(v => Math.max(0, v)));
+  }
   return result;
 }
 
@@ -412,22 +426,24 @@ function svmCorrect(normX: number[], model: SVMModel): { correction: number; sco
 
 interface RFState { modelJsons: string[] } // one JSON per target
 
-function fitRF(
+async function fitRF(
   normFeatures: number[][], targets: number[][],
   onProgress?: (pct: number) => void
-): { models: RandomForestRegression[]; state: RFState } {
+): Promise<{ models: RandomForestRegression[]; state: RFState }> {
   const models: RandomForestRegression[] = [];
   const modelJsons: string[] = [];
 
   for (let t = 0; t < N_TARGETS; t++) {
     onProgress?.((t / N_TARGETS) * 100);
+    // Yield to event loop between targets so server stays responsive
+    await new Promise(resolve => setImmediate(resolve));
     const y = targets.map(row => row[t]);
     const rf = new RandomForestRegression({
-      nEstimators: 80,
+      nEstimators: 50,
       maxFeatures: 0.65,
       replacement: true,
       useSampleBagging: true,
-      treeOptions: { maxDepth: 7, minNumSamples: 3 },
+      treeOptions: { maxDepth: 6, minNumSamples: 3 },
       seed: 42 + t,
     });
     rf.train(normFeatures, y);
@@ -460,11 +476,11 @@ interface GBMState {
   treesPerTarget: Array<Array<{ modelJson: string; lr: number }>>;
 }
 
-function fitGBM(
+async function fitGBM(
   normFeatures: number[][], targets: number[][],
-  nIter = 50, initLr = 0.08,
+  nIter = 30, initLr = 0.08,
   onProgress?: (pct: number) => void
-): { state: GBMState } {
+): Promise<{ state: GBMState }> {
   const basePredictions = Array(N_TARGETS).fill(0).map((_, t) =>
     arrMean(targets.map(y => y[t]))
   );
@@ -477,6 +493,8 @@ function fitGBM(
 
     for (let iter = 0; iter < nIter; iter++) {
       onProgress?.(((t * nIter + iter) / (N_TARGETS * nIter)) * 100);
+      // Yield to event loop every 5 iterations so server stays responsive
+      if (iter % 5 === 0) await new Promise(resolve => setImmediate(resolve));
       // Pseudo-residuals: negative gradient of MSE = -(target - prediction)
       const residuals = targets.map((y, i) => y[t] - current[i]);
 
@@ -772,28 +790,33 @@ class XGEngine {
       prog(8 + (e / total) * 22, `TF.js ANN epoch ${e}/${total}...`);
     });
     this.annModel = annLive;
-    const annPreds = normFeatures.map(x => annPredict(annLive, x));
+    const annPreds = annPredictBatch(annLive, normFeatures);
     prog(30, "ANN training complete.");
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 2. HMM ────────────────────────────────────────────────────────────────
     prog(32, "Fitting Hidden Markov Model (5 latent states)...");
     const hmmModel = fitHMM(normFeatures, allTargets);
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 3. GP ─────────────────────────────────────────────────────────────────
     prog(36, "Fitting Gaussian Process (ml-matrix RBF kernel)...");
     const gpModel = fitGP(normFeatures, allTargets);
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 4. GARCH ──────────────────────────────────────────────────────────────
     prog(40, "Fitting GARCH(1,1) volatility model...");
     const garchModel = fitGARCH(allTargets);
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 5. SVM ────────────────────────────────────────────────────────────────
     prog(44, "Training SVM classifier (hinge loss + SGD)...");
     const svmModel = fitSVM(normFeatures, allTargets);
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 6. Random Forest ──────────────────────────────────────────────────────
-    prog(48, "Training Random Forest with ml-random-forest (80 CART trees)...");
-    const { models: rfLive, state: rfState } = fitRF(normFeatures, allTargets, (pct) => {
+    prog(48, "Training Random Forest with ml-random-forest (50 CART trees)...");
+    const { models: rfLive, state: rfState } = await fitRF(normFeatures, allTargets, (pct) => {
       prog(48 + pct * 0.14, `RF training target ${Math.round(pct / (100 / N_TARGETS) + 1)}/${N_TARGETS}...`);
     });
     this.rfModels = rfLive;
@@ -801,8 +824,8 @@ class XGEngine {
     prog(62, "Random Forest training complete.");
 
     // ── 7. GBM ────────────────────────────────────────────────────────────────
-    prog(64, "Training Gradient Boosting (ml-cart CART trees, 50 iterations)...");
-    const { state: gbmState } = fitGBM(normFeatures, allTargets, 50, 0.08, (pct) => {
+    prog(64, "Training Gradient Boosting (ml-cart CART trees, 30 iterations)...");
+    const { state: gbmState } = await fitGBM(normFeatures, allTargets, 30, 0.08, (pct) => {
       prog(64 + pct * 0.12, `GBM ${pct.toFixed(0)}%...`);
     });
     this.gbmLive = restoreGBM(gbmState);
