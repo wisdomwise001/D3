@@ -19,7 +19,7 @@ interface XGPrediction {
   awayFirstHalfXg: number;
   homeSecondHalfXg: number;
   awaySecondHalfXg: number;
-  confidence: number[];
+  confidence: number;
   volatility: string;
   volatilityFactor: number;
   matchState: string;
@@ -27,15 +27,15 @@ interface XGPrediction {
   svmCorrection: number;
   causalDelta: number[];
   causalExplanation: Record<string, number>;
-  metaWeights: number[][];
   componentPredictions: {
     ann: number[];
     rf: number[];
     gbm: number[];
+    meta: number[];
     hmm: { state: string; factor: number };
     garch: { label: string; factor: number };
     svm: { correction: number; score: number };
-    gp: { variance: number[] };
+    gp: { variance: number };
   };
   derived: {
     totalXg: number;
@@ -254,9 +254,9 @@ export default function XGEngineTab({
       <View style={styles.confidenceSection}>
         <View style={styles.confCard}>
           <Ionicons name="pulse-outline" size={14} color="#34d399" />
-          <Text style={styles.confLabel}>GP Uncertainty (FT)</Text>
+          <Text style={styles.confLabel}>GP Uncertainty (σ)</Text>
           <Text style={styles.confValue}>
-            ±{p.confidence[0]?.toFixed(2)} / ±{p.confidence[1]?.toFixed(2)}
+            ±{(typeof p.confidence === "number" ? p.confidence : p.confidence).toFixed(3)} goals
           </Text>
         </View>
         <View style={[styles.confCard, { borderColor: volColor + "44" }]}>
@@ -310,29 +310,19 @@ export default function XGEngineTab({
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Meta-Learner Weights</Text>
-        <Text style={styles.sectionSub}>Learned optimal combination per output</Text>
-        {["FT Home", "FT Away", "H1 Home", "H1 Away", "H2 Home", "H2 Away"].map((label, t) => (
-          <View key={label} style={styles.metaWeightRow}>
-            <Text style={styles.metaWeightLabel}>{label}</Text>
-            <View style={styles.metaWeightBars}>
-              {["ANN", "RF", "GBM"].map((m, mi) => (
-                <View key={m} style={styles.metaWeightItem}>
-                  <Text style={styles.metaWeightModel}>{m}</Text>
-                  <View style={styles.metaWeightTrack}>
-                    <View style={[styles.metaWeightFill, {
-                      width: `${(p.metaWeights[t]?.[mi] ?? 0) * 100}%`,
-                      backgroundColor: ["#60a5fa", "#fb923c", "#e879f9"][mi],
-                    }]} />
-                  </View>
-                  <Text style={styles.metaWeightPct}>
-                    {((p.metaWeights[t]?.[mi] ?? 0) * 100).toFixed(0)}%
-                  </Text>
-                </View>
-              ))}
-            </View>
+        <Text style={styles.sectionTitle}>Meta-Learner Output</Text>
+        <Text style={styles.sectionSub}>OLS-combined prediction from ANN + RF + GBM (ml-regression)</Text>
+        <ComponentRow name="Meta" values={p.componentPredictions.meta ?? []} color="#34d399" note="OLS Combined" />
+        <View style={styles.metaGpRow}>
+          <View style={styles.metaGpCard}>
+            <Text style={styles.metaGpLabel}>GP Variance</Text>
+            <Text style={styles.metaGpValue}>{(p.componentPredictions.gp?.variance ?? 0).toFixed(4)}</Text>
           </View>
-        ))}
+          <View style={styles.metaGpCard}>
+            <Text style={styles.metaGpLabel}>HMM Factor</Text>
+            <Text style={styles.metaGpValue}>{(p.componentPredictions.hmm?.factor ?? 1).toFixed(3)}×</Text>
+          </View>
+        </View>
       </View>
 
       <View style={styles.section}>
@@ -451,14 +441,13 @@ const styles = StyleSheet.create({
   compName: { fontSize: 13, fontFamily: "Inter_700Bold" },
   compNote: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
   compVals: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
-  metaWeightRow: { marginBottom: 10 },
-  metaWeightLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", color: Colors.dark.text, marginBottom: 4 },
-  metaWeightBars: { gap: 4 },
-  metaWeightItem: { flexDirection: "row", alignItems: "center", gap: 6 },
-  metaWeightModel: { fontSize: 10, fontFamily: "Inter_500Medium", color: Colors.dark.textSecondary, width: 28 },
-  metaWeightTrack: { flex: 1, height: 5, backgroundColor: Colors.dark.border, borderRadius: 3, overflow: "hidden" },
-  metaWeightFill: { height: "100%", borderRadius: 3 },
-  metaWeightPct: { fontSize: 10, fontFamily: "Inter_600SemiBold", color: Colors.dark.text, width: 30, textAlign: "right" },
+  metaGpRow: { flexDirection: "row", gap: 8, marginTop: 8 },
+  metaGpCard: {
+    flex: 1, backgroundColor: Colors.dark.background, borderRadius: 8, padding: 10,
+    borderWidth: 1, borderColor: Colors.dark.border, alignItems: "center", gap: 2,
+  },
+  metaGpLabel: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  metaGpValue: { fontSize: 14, fontFamily: "Inter_700Bold", color: "#34d399" },
   svmRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
   svmLabel: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
   svmValue: { fontSize: 13, fontFamily: "Inter_700Bold" },

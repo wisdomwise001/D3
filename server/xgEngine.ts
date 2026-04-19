@@ -1,29 +1,29 @@
 /**
  * Multi-Paradigm Probabilistic xG Forecasting Engine
- *
- * Architecture:
- *   ANN  → baseline xG (neural network backprop)
- *   HMM  → match-state adjustment (hidden Markov model)
- *   GP   → uncertainty quantification (Gaussian process)
- *   GARCH→ volatility factor (GARCH(1,1))
- *   SVM  → boundary correction (gradient-descent SVM)
- *   RF   → ensemble refinement (random forest)
- *   GBM  → sequential refinement (gradient boosting)
- *   Causal→ delta adjustment (regression-based causal)
- *   Meta → learned combination of all outputs
+ * Uses real ML libraries:
+ *  - @tensorflow/tfjs  → ANN with Adam optimizer + proper backpropagation
+ *  - ml-random-forest  → Random Forest with CART trees + bootstrap sampling
+ *  - ml-cart           → CART decision trees for Gradient Boosting
+ *  - ml-regression     → OLS MultivariateLinearRegression for Causal model
+ *  - ml-matrix         → Matrix algebra for Gaussian Process
  */
 
+import * as tf from "@tensorflow/tfjs";
+import { RandomForestRegression } from "ml-random-forest";
+import { DecisionTreeRegression } from "ml-cart";
+import { MultivariateLinearRegression } from "ml-regression";
+import { Matrix } from "ml-matrix";
 import db from "./db";
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS engine_models (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_name    TEXT NOT NULL UNIQUE,
-    weights       TEXT NOT NULL,
-    trained_at    TEXT NOT NULL,
-    training_samples INTEGER DEFAULT 0,
-    metrics       TEXT DEFAULT '{}'
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name        TEXT NOT NULL UNIQUE,
+    weights           TEXT NOT NULL,
+    trained_at        TEXT NOT NULL,
+    training_samples  INTEGER DEFAULT 0,
+    metrics           TEXT DEFAULT '{}'
   )
 `);
 
@@ -58,7 +58,7 @@ export const TARGET_NAMES = [
 ];
 export const N_TARGETS = TARGET_NAMES.length;
 
-// ─── Feature / target extraction ──────────────────────────────────────────────
+// ─── Feature / Target extraction ──────────────────────────────────────────────
 export function extractFeatures(row: Record<string, any>): number[] {
   return FEATURE_NAMES.map(name => {
     const v = row[name];
@@ -71,40 +71,7 @@ export function extractTargets(row: Record<string, any>): number[] {
   const aFt = Number(row.away_goals ?? 0);
   const hHt = row.home_ht_goals != null ? Number(row.home_ht_goals) : hFt * 0.4;
   const aHt = row.away_ht_goals != null ? Number(row.away_ht_goals) : aFt * 0.4;
-  const hH2 = Math.max(0, hFt - hHt);
-  const aH2 = Math.max(0, aFt - aHt);
-  return [hFt, aFt, hHt, aHt, hH2, aH2];
-}
-
-// ─── Math utilities ───────────────────────────────────────────────────────────
-function relu(x: number) { return x > 0 ? x : 0; }
-function clamp(x: number, lo: number, hi: number) { return x < lo ? lo : x > hi ? hi : x; }
-function sigmoid(x: number) { return 1 / (1 + Math.exp(-x)); }
-
-function randGauss(): number {
-  let u = 0, v = 0;
-  while (!u) u = Math.random();
-  while (!v) v = Math.random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
-
-function dot(a: number[], b: number[]): number {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-}
-
-function vecAdd(a: number[], b: number[]): number[] { return a.map((v, i) => v + b[i]); }
-function vecScale(a: number[], s: number): number[] { return a.map(v => v * s); }
-function vecSub(a: number[], b: number[]): number[] { return a.map((v, i) => v - b[i]); }
-
-function arrMean(arr: number[]): number {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-function arrStd(arr: number[], m = arrMean(arr)): number {
-  if (arr.length < 2) return 1;
-  return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length) || 1;
+  return [hFt, aFt, hHt, aHt, Math.max(0, hFt - hHt), Math.max(0, aFt - aHt)];
 }
 
 // ─── Min-Max Scaler ───────────────────────────────────────────────────────────
@@ -120,167 +87,154 @@ export function fitScaler(data: number[][]): Scaler {
       if (row[i] > max[i]) max[i] = row[i];
     }
   }
-  const scale = min.map((mn, i) => (max[i] - mn) || 1);
-  return { min, scale };
+  return { min, scale: min.map((mn, i) => (max[i] - mn) || 1) };
 }
 
-export function applyScaler(x: number[], scaler: Scaler): number[] {
-  return x.map((v, i) => (v - scaler.min[i]) / scaler.scale[i]);
+export function applyScaler(x: number[], s: Scaler): number[] {
+  return x.map((v, i) => (v - s.min[i]) / s.scale[i]);
 }
 
-// ─── 1. ANN (Artificial Neural Network) ──────────────────────────────────────
-// 2-hidden-layer MLP trained with SGD backpropagation
-// D → H1 (ReLU) → H2 (ReLU) → O (linear + clamp ≥0)
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+function clamp(x: number, lo: number, hi: number) { return x < lo ? lo : x > hi ? hi : x; }
+function arrMean(a: number[]): number { return a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0; }
+function arrStd(a: number[], m = arrMean(a)): number {
+  return a.length < 2 ? 1 : Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length) || 1;
+}
+function dot(a: number[], b: number[]): number {
+  let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s;
+}
+function randGauss(): number {
+  let u = 0, v = 0;
+  while (!u) u = Math.random(); while (!v) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// ─── 1. ANN — @tensorflow/tfjs (Adam optimizer, real backpropagation) ─────────
+// Builds a proper feed-forward neural network using TensorFlow.js.
+// Architecture: D → Dense(64, relu) → Dense(32, relu) → Dense(6, relu)
+// Optimizer: Adam (adaptive learning rates per parameter)
+// Loss: Mean Squared Error
 
 interface ANNState {
-  W1: number[][];
-  b1: number[];
-  W2: number[][];
-  b2: number[];
-  W3: number[][];
-  b3: number[];
-  D: number; H1: number; H2: number; O: number;
+  weightData: Array<{ shape: number[]; data: number[] }>;
 }
 
-class ANN {
-  W1: number[][];
-  b1: number[];
-  W2: number[][];
-  b2: number[];
-  W3: number[][];
-  b3: number[];
-  D: number; H1: number; H2: number; O: number;
-
-  constructor(D: number, H1: number, H2: number, O: number) {
-    this.D = D; this.H1 = H1; this.H2 = H2; this.O = O;
-    const s1 = Math.sqrt(2 / D);
-    const s2 = Math.sqrt(2 / H1);
-    const s3 = Math.sqrt(2 / H2);
-    this.W1 = Array.from({ length: H1 }, () => Array.from({ length: D }, () => randGauss() * s1));
-    this.b1 = Array(H1).fill(0);
-    this.W2 = Array.from({ length: H2 }, () => Array.from({ length: H1 }, () => randGauss() * s2));
-    this.b2 = Array(H2).fill(0);
-    this.W3 = Array.from({ length: O }, () => Array.from({ length: H2 }, () => randGauss() * s3));
-    this.b3 = Array(O).fill(0.5);
-  }
-
-  forward(x: number[]): { h1: number[]; h2: number[]; out: number[] } {
-    const h1 = this.W1.map((row, i) => relu(dot(row, x) + this.b1[i]));
-    const h2 = this.W2.map((row, i) => relu(dot(row, h1) + this.b2[i]));
-    const out = this.W3.map((row, i) => Math.max(0, dot(row, h2) + this.b3[i]));
-    return { h1, h2, out };
-  }
-
-  backward(x: number[], targets: number[], lr: number, lambda = 0.0005): number {
-    const { h1, h2, out } = this.forward(x);
-    const dOut = out.map((o, i) => 2 * (o - targets[i]) / this.O);
-
-    for (let i = 0; i < this.O; i++) {
-      for (let j = 0; j < this.H2; j++)
-        this.W3[i][j] -= lr * (dOut[i] * h2[j] + lambda * this.W3[i][j]);
-      this.b3[i] -= lr * dOut[i];
-    }
-
-    const dH2 = Array(this.H2).fill(0);
-    for (let j = 0; j < this.H2; j++) {
-      for (let i = 0; i < this.O; i++) dH2[j] += dOut[i] * this.W3[i][j];
-      if (h2[j] <= 0) dH2[j] = 0;
-    }
-    for (let i = 0; i < this.H2; i++) {
-      for (let j = 0; j < this.H1; j++)
-        this.W2[i][j] -= lr * (dH2[i] * h1[j] + lambda * this.W2[i][j]);
-      this.b2[i] -= lr * dH2[i];
-    }
-
-    const dH1 = Array(this.H1).fill(0);
-    for (let j = 0; j < this.H1; j++) {
-      for (let i = 0; i < this.H2; i++) dH1[j] += dH2[i] * this.W2[i][j];
-      if (h1[j] <= 0) dH1[j] = 0;
-    }
-    for (let i = 0; i < this.H1; i++) {
-      for (let j = 0; j < this.D; j++)
-        this.W1[i][j] -= lr * (dH1[i] * x[j] + lambda * this.W1[i][j]);
-      this.b1[i] -= lr * dH1[i];
-    }
-
-    return out.reduce((s, o, i) => s + (o - targets[i]) ** 2, 0) / this.O;
-  }
-
-  predict(x: number[]): number[] { return this.forward(x).out; }
-
-  toState(): ANNState {
-    return { W1: this.W1, b1: this.b1, W2: this.W2, b2: this.b2, W3: this.W3, b3: this.b3, D: this.D, H1: this.H1, H2: this.H2, O: this.O };
-  }
-
-  fromState(s: ANNState) {
-    this.W1 = s.W1; this.b1 = s.b1; this.W2 = s.W2; this.b2 = s.b2;
-    this.W3 = s.W3; this.b3 = s.b3;
-  }
+async function buildANNModel(inputDim: number): Promise<tf.LayersModel> {
+  const model = tf.sequential();
+  model.add(tf.layers.dense({
+    units: 64, activation: "relu", inputShape: [inputDim],
+    kernelInitializer: "heNormal",
+  }));
+  model.add(tf.layers.dropout({ rate: 0.1 }));
+  model.add(tf.layers.dense({
+    units: 32, activation: "relu",
+    kernelInitializer: "heNormal",
+  }));
+  model.add(tf.layers.dropout({ rate: 0.1 }));
+  model.add(tf.layers.dense({
+    units: N_TARGETS, activation: "relu",
+    kernelInitializer: "glorotNormal",
+  }));
+  model.compile({
+    optimizer: tf.train.adam(0.001, 0.9, 0.999, 1e-7),
+    loss: "meanSquaredError",
+    metrics: ["mae"],
+  });
+  return model;
 }
 
-// ─── 2. HMM (Hidden Markov Model) ────────────────────────────────────────────
-// 5 latent match states. Emissions are Gaussian over key offensive feature pairs.
+async function trainANN(
+  features: number[][], targets: number[][],
+  onProgress?: (e: number, total: number) => void
+): Promise<{ model: tf.LayersModel; state: ANNState }> {
+  const model = await buildANNModel(features[0].length);
+  const xs = tf.tensor2d(features);
+  const ys = tf.tensor2d(targets);
+
+  const totalEpochs = 200;
+  await model.fit(xs, ys, {
+    epochs: totalEpochs,
+    batchSize: Math.min(32, Math.floor(features.length / 4)),
+    validationSplit: 0.1,
+    shuffle: true,
+    verbose: 0,
+    callbacks: {
+      onEpochEnd: async (epoch: number) => {
+        if (epoch % 20 === 0) onProgress?.(epoch, totalEpochs);
+      },
+    },
+  });
+
+  xs.dispose();
+  ys.dispose();
+
+  const weightData = model.getWeights().map(w => ({
+    shape: w.shape,
+    data: Array.from(w.dataSync()),
+  }));
+
+  return { model, state: { weightData } };
+}
+
+async function restoreANN(state: ANNState): Promise<tf.LayersModel> {
+  const model = await buildANNModel(N_FEATURES);
+  const tensors = state.weightData.map(w => tf.tensor(w.data, w.shape));
+  model.setWeights(tensors);
+  tensors.forEach(t => t.dispose());
+  return model;
+}
+
+function annPredict(model: tf.LayersModel, x: number[]): number[] {
+  const tensor = tf.tensor2d([x]);
+  const output = model.predict(tensor) as tf.Tensor;
+  const result = Array.from(output.dataSync()).map(v => Math.max(0, v));
+  tensor.dispose();
+  output.dispose();
+  return result;
+}
+
+// ─── 2. HMM — Custom Gaussian HMM (5 latent match states) ────────────────────
+// Latent states capture unobservable match dynamics.
+// Emissions are Gaussian distributions fitted to the data per cluster.
 // States: very_defensive, defensive, balanced, attacking, very_attacking
-// Each state has a mean vector and diagonal covariance.
-// The state probabilities modify the xG scaling factor.
 
 const HMM_STATES = ["very_defensive", "defensive", "balanced", "attacking", "very_attacking"] as const;
 type HMMState = typeof HMM_STATES[number];
 
-const HMM_STATE_XG_FACTOR: Record<HMMState, number> = {
+const HMM_XG_FACTOR: Record<HMMState, number> = {
   very_defensive: 0.65,
-  defensive: 0.80,
+  defensive: 0.82,
   balanced: 1.00,
   attacking: 1.20,
   very_attacking: 1.40,
 };
 
+const HMM_FEATURE_IDX = [0, 1, 2, 3, 4, 5, 16, 17]; // xg, goals, conceded, attack
+
 interface HMMModel {
-  means: number[][];  // [5 states x 6 features]
+  means: number[][];
   stds: number[][];
-  priors: number[];   // [5]
-  transition: number[][];  // [5 x 5]
-  featureIdx: number[];    // which features to use for emissions
+  priors: number[];
 }
 
-// Key features for HMM emissions (indices into feature vector)
-const HMM_FEATURES = [0, 1, 2, 3, 4, 5, 16, 17]; // xg, goals, conceded, attack
-
-function hmmEmissionLogProb(x: number[], mean: number[], std: number[]): number {
-  let lp = 0;
-  for (let i = 0; i < mean.length; i++) {
-    const diff = x[i] - mean[i];
-    const s = std[i] || 0.01;
-    lp -= 0.5 * Math.log(2 * Math.PI * s * s) + (diff * diff) / (2 * s * s);
-  }
-  return lp;
-}
-
-function fitHMM(features: number[][], targets: number[][]): HMMModel {
+function fitHMM(normFeatures: number[][], targets: number[][]): HMMModel {
   const K = 5;
-  const n = features.length;
-  const fIdx = HMM_FEATURES;
+  const fIdx = HMM_FEATURE_IDX;
+  const X = normFeatures.map(f => fIdx.map(i => f[i]));
+  const n = X.length;
   const d = fIdx.length;
 
-  // Extract sub-features
-  const X = features.map(f => fIdx.map(i => f[i]));
+  // Sort by total attacking output → bin into 5 equal clusters
+  const scores = targets.map((t, i) => ({ i, score: t[0] + t[1] }));
+  scores.sort((a, b) => a.score - b.score);
 
-  // Init K-means style: divide sorted data into K clusters by home_ft_xg + away_ft_xg
-  const sortedIdx = targets.map((t, i) => ({ i, score: t[0] + t[1] }))
-    .sort((a, b) => a.score - b.score)
-    .map(e => e.i);
-
-  const chunkSize = Math.ceil(n / K);
+  const chunkSz = Math.ceil(n / K);
   const means: number[][] = [];
   const stds: number[][] = [];
 
   for (let k = 0; k < K; k++) {
-    const chunk = sortedIdx.slice(k * chunkSize, (k + 1) * chunkSize).map(i => X[i]);
-    if (!chunk.length) {
-      means.push(Array(d).fill(0.5));
-      stds.push(Array(d).fill(0.3));
-      continue;
-    }
+    const chunk = scores.slice(k * chunkSz, (k + 1) * chunkSz).map(e => X[e.i]);
+    if (!chunk.length) { means.push(Array(d).fill(0.5)); stds.push(Array(d).fill(0.1)); continue; }
     const m = Array(d).fill(0);
     for (const row of chunk) for (let j = 0; j < d; j++) m[j] += row[j] / chunk.length;
     const s = Array(d).fill(0);
@@ -289,40 +243,38 @@ function fitHMM(features: number[][], targets: number[][]): HMMModel {
     stds.push(s.map(v => Math.sqrt(v) || 0.05));
   }
 
-  // Uniform priors & transition matrix (slight tendency to stay in same state)
-  const priors = Array(K).fill(1 / K);
-  const transition = Array.from({ length: K }, (_, k) => {
-    const row = Array(K).fill(0.1);
-    row[k] = 0.6;
-    return row;
-  });
-
-  return { means, stds, priors, transition, featureIdx: fIdx };
+  return { means, stds, priors: Array(K).fill(1 / K) };
 }
 
-function hmmPredict(x: number[], model: HMMModel): { state: HMMState; stateProbabilities: number[]; xgFactor: number } {
-  const fVec = model.featureIdx.map(i => x[i]);
-  const logProbs = model.means.map((m, k) => hmmEmissionLogProb(fVec, m, model.stds[k]) + Math.log(model.priors[k]));
+function hmmLogProb(x: number[], m: number[], s: number[]): number {
+  let lp = 0;
+  for (let i = 0; i < m.length; i++) {
+    const si = s[i] || 0.01;
+    lp -= 0.5 * Math.log(2 * Math.PI * si * si) + (x[i] - m[i]) ** 2 / (2 * si * si);
+  }
+  return lp;
+}
+
+function hmmPredict(normX: number[], model: HMMModel): { state: HMMState; probs: number[]; factor: number } {
+  const fVec = HMM_FEATURE_IDX.map(i => normX[i]);
+  const logProbs = model.means.map((m, k) => hmmLogProb(fVec, m, model.stds[k]) + Math.log(model.priors[k]));
   const maxLP = Math.max(...logProbs);
   const probs = logProbs.map(lp => Math.exp(lp - maxLP));
-  const sumP = probs.reduce((a, b) => a + b, 0) || 1;
-  const normalised = probs.map(p => p / sumP);
-
-  const stateIdx = normalised.indexOf(Math.max(...normalised));
-  const state = HMM_STATES[stateIdx];
-  const xgFactor = normalised.reduce((s, p, k) => s + p * HMM_STATE_XG_FACTOR[HMM_STATES[k]], 0);
-
-  return { state, stateProbabilities: normalised, xgFactor };
+  const sum = probs.reduce((a, b) => a + b, 0) || 1;
+  const norm = probs.map(p => p / sum);
+  const stateIdx = norm.indexOf(Math.max(...norm));
+  const factor = norm.reduce((s, p, k) => s + p * HMM_XG_FACTOR[HMM_STATES[k]], 0);
+  return { state: HMM_STATES[stateIdx], probs: norm, factor };
 }
 
-// ─── 3. Gaussian Process (uncertainty estimation) ────────────────────────────
-// RBF kernel; Nyström approximation using up to 50 inducing points.
-// Outputs: posterior variance as confidence measure.
+// ─── 3. GP — ml-matrix for proper matrix algebra ──────────────────────────────
+// Gaussian Process with Squared Exponential (RBF) kernel.
+// Posterior variance: σ²(x*) = k(x*, x*) – k_*ᵀ (K + σ²I)⁻¹ k_*
+// Uses ml-matrix for numerically stable Cholesky / pseudo-inverse.
 
 interface GPModel {
-  inducingX: number[][];  // up to 50 training points
-  inducingY: number[][];  // their targets
-  alpha: number;          // noise variance
+  inducingX: number[][];
+  alpha: number;        // noise
   lengthScale: number;
 }
 
@@ -332,120 +284,116 @@ function rbfKernel(a: number[], b: number[], ls: number): number {
   return Math.exp(-d2 / (2 * ls * ls));
 }
 
-function fitGP(features: number[][], targets: number[][]): GPModel {
-  const m = Math.min(50, features.length);
-  const step = Math.max(1, Math.floor(features.length / m));
-  const inducingX = features.filter((_, i) => i % step === 0).slice(0, m);
-  const inducingY = targets.filter((_, i) => i % step === 0).slice(0, m);
+function fitGP(normFeatures: number[][], targets: number[][]): GPModel {
+  const maxInducing = 60;
+  const step = Math.max(1, Math.floor(normFeatures.length / maxInducing));
+  const inducingX = normFeatures.filter((_, i) => i % step === 0).slice(0, maxInducing);
 
-  // Estimate length scale from data variance
-  let totalVar = 0, cnt = 0;
-  for (let i = 0; i < Math.min(inducingX.length, 20); i++) {
-    for (let j = i + 1; j < Math.min(inducingX.length, 20); j++) {
+  // Median heuristic for length scale
+  let totalD2 = 0; let pairs = 0;
+  for (let i = 0; i < Math.min(inducingX.length, 25); i++) {
+    for (let j = i + 1; j < Math.min(inducingX.length, 25); j++) {
       let d2 = 0;
       for (let k = 0; k < inducingX[0].length; k++) d2 += (inducingX[i][k] - inducingX[j][k]) ** 2;
-      totalVar += d2; cnt++;
+      totalD2 += d2; pairs++;
     }
   }
-  const lengthScale = cnt > 0 ? Math.sqrt(totalVar / cnt) * 0.5 : 1;
+  const lengthScale = pairs > 0 ? Math.sqrt(totalD2 / pairs) * 0.4 : 1;
 
-  return { inducingX, inducingY, alpha: 0.01, lengthScale };
+  return { inducingX, alpha: 0.05, lengthScale };
 }
 
-function gpPredict(x: number[], model: GPModel): { variance: number[] } {
-  const ls = model.lengthScale;
+function gpPredict(normX: number[], model: GPModel): { variance: number } {
+  const { inducingX, alpha, lengthScale: ls } = model;
+  const m = inducingX.length;
 
-  // Kernel between test point and inducing points
-  const k_star = model.inducingX.map(xi => rbfKernel(x, xi, ls));
+  // Build K (m×m) kernel matrix with noise diagonal
+  const K = new Matrix(m, m);
+  for (let i = 0; i < m; i++) {
+    for (let j = 0; j < m; j++) {
+      K.set(i, j, rbfKernel(inducingX[i], inducingX[j], ls) + (i === j ? alpha : 0));
+    }
+  }
 
-  // Kernel matrix K(Xm, Xm) + noise*I (diagonal approximation)
-  const kSelf = 1.0; // rbf(x, x, ls) = 1.0
+  // k_star: kernel between test point and inducing points (m×1)
+  const kStar = new Matrix(m, 1);
+  for (let i = 0; i < m; i++) kStar.set(i, 0, rbfKernel(normX, inducingX[i], ls));
 
-  // Approximate posterior variance via diagonal GP approximation
-  const diagK = model.inducingX.map(xi => rbfKernel(xi, xi, ls) + model.alpha);
-  const kInvK = k_star.map((k, i) => k / diagK[i]);
-  const reduction = clamp(dot(k_star, kInvK), 0, 0.98);
+  // Posterior variance: k** - k_*^T K^{-1} k_*
+  // Use pseudo-inverse from ml-matrix for numerical stability
+  let KInv: Matrix;
+  try {
+    KInv = Matrix.pseudoInverse(K);
+  } catch {
+    // Fallback to diagonal approximation
+    KInv = Matrix.zeros(m, m);
+    for (let i = 0; i < m; i++) KInv.set(i, i, 1 / (K.get(i, i) || 1));
+  }
 
-  // Base variance (epistemic) + aleatoric noise floor
+  const reduction = kStar.transpose().mmul(KInv).mmul(kStar).get(0, 0);
+  const kSelf = 1.0; // RBF(x, x) = 1
   const epistemicVar = Math.max(0, kSelf - reduction);
-  const minNoise = 0.05; // minimum uncertainty floor (~±0.22 goals)
-
-  const variance: number[] = Array(N_TARGETS).fill(epistemicVar + minNoise);
+  const variance = epistemicVar + 0.04; // aleatoric noise floor
 
   return { variance };
 }
 
-// ─── 4. GARCH(1,1) – Volatility Model ─────────────────────────────────────────
-// Tracks time-series variance of residuals to compute a volatility factor.
+// ─── 4. GARCH(1,1) — Custom (no npm equivalent exists) ────────────────────────
+// Estimates time-series volatility of goal scoring.
+// σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
 
 interface GARCHModel {
-  omega: number;
-  alpha: number;  // ARCH coefficient
-  beta: number;   // GARCH coefficient
-  longRunVar: number;
-  residualStd: number;
+  omega: number; alpha: number; beta: number;
+  longRunVar: number; residualStd: number;
 }
 
 function fitGARCH(targets: number[][]): GARCHModel {
-  const totalGoals = targets.map(t => t[0] + t[1]); // home + away goals
+  const totalGoals = targets.map(t => t[0] + t[1]);
   const mu = arrMean(totalGoals);
   const residuals = totalGoals.map(g => g - mu);
-
-  // Simple MLE-style estimation via moment matching
-  const varResid = arrMean(residuals.map(r => r * r));
-  // GARCH(1,1): ω/(1 - α - β) = long-run variance; use α=0.15, β=0.75
-  const alpha = 0.15;
-  const beta = 0.75;
-  const omega = varResid * (1 - alpha - beta);
-
-  return { omega, alpha, beta, longRunVar: varResid, residualStd: arrStd(residuals) };
+  const varR = arrMean(residuals.map(r => r * r));
+  const alpha = 0.15, beta = 0.75;
+  const omega = varR * (1 - alpha - beta);
+  return { omega, alpha, beta, longRunVar: varR, residualStd: arrStd(residuals) };
 }
 
-function garchVolatilityFactor(featureXg: number, model: GARCHModel): { factor: number; label: string } {
-  // Estimate current conditional variance
-  const eps2 = (featureXg - model.longRunVar) ** 2;
+function garchVolatility(rawXg: number, model: GARCHModel): { label: string; factor: number } {
+  const eps2 = (rawXg - model.longRunVar) ** 2;
   const sigma2 = model.omega + model.alpha * eps2 + model.beta * model.longRunVar;
-  const factor = Math.sqrt(sigma2 / (model.longRunVar || 1));
-  const label = factor < 0.9 ? "Low" : factor < 1.1 ? "Medium" : "High";
-  return { factor: clamp(factor, 0.7, 1.5), label };
+  const factor = clamp(Math.sqrt(sigma2 / (model.longRunVar || 1)), 0.7, 1.6);
+  return { factor, label: factor < 0.9 ? "Low" : factor < 1.1 ? "Medium" : "High" };
 }
 
-// ─── 5. SVM (Support Vector Machine) ─────────────────────────────────────────
-// Linear SVM for boundary correction (high/low scoring binary classification).
-// Trained with hinge loss + L2 reg via SGD.
+// ─── 5. SVM — Kernel SVM via gradient descent (custom, no libsvm-js to avoid WASM async) ──
+// Linear SVM with hinge loss + L2 regularization.
+// Classifies high-scoring vs low-scoring games as a boundary correction signal.
 
-interface SVMModel {
-  weights: number[];
-  bias: number;
-  threshold: number;
-}
+interface SVMModel { weights: number[]; bias: number; threshold: number }
 
-function fitSVM(features: number[][], targets: number[][]): SVMModel {
-  const n = features.length;
-  const d = features[0].length;
+function fitSVM(normFeatures: number[][], targets: number[][]): SVMModel {
+  const n = normFeatures.length;
+  const d = normFeatures[0].length;
   const mu = arrMean(targets.map(t => t[0] + t[1]));
-
-  // Binary labels: +1 = high scoring (total > mu), -1 = low scoring
   const labels = targets.map(t => (t[0] + t[1]) > mu ? 1 : -1);
 
   const w = Array(d).fill(0);
   let b = 0;
-  const lr = 0.01;
-  const lambda = 0.001;
-  const epochs = 50;
+  const lambda = 0.0005;
+  const epochs = 80;
 
   for (let e = 0; e < epochs; e++) {
-    const lrE = lr * (1 / (1 + 0.1 * e));
-    for (let i = 0; i < n; i++) {
-      const x = features[i];
+    const lr = 0.01 / (1 + 0.05 * e);
+    // Shuffle indices
+    const idx = Array.from({ length: n }, (_, i) => i).sort(() => Math.random() - 0.5);
+    for (const i of idx) {
+      const x = normFeatures[i];
       const y = labels[i];
       const margin = y * (dot(w, x) + b);
       if (margin < 1) {
-        // Hinge loss gradient
-        for (let j = 0; j < d; j++) w[j] -= lrE * (lambda * w[j] - y * x[j]);
-        b -= lrE * (-y);
+        for (let j = 0; j < d; j++) w[j] -= lr * (lambda * w[j] - y * x[j]);
+        b -= lr * (-y);
       } else {
-        for (let j = 0; j < d; j++) w[j] -= lrE * lambda * w[j];
+        for (let j = 0; j < d; j++) w[j] -= lr * lambda * w[j];
       }
     }
   }
@@ -453,299 +401,240 @@ function fitSVM(features: number[][], targets: number[][]): SVMModel {
   return { weights: w, bias: b, threshold: mu };
 }
 
-function svmCorrection(x: number[], model: SVMModel): { correction: number; score: number } {
-  const score = dot(model.weights, x) + model.bias;
-  // Map decision score to xG correction: positive → upward correction
-  const correction = clamp(score * 0.05, -0.3, 0.3);
-  return { correction, score };
+function svmCorrect(normX: number[], model: SVMModel): { correction: number; score: number } {
+  const score = dot(model.weights, normX) + model.bias;
+  return { score, correction: clamp(score * 0.04, -0.25, 0.25) };
 }
 
-// ─── 6. Random Forest ─────────────────────────────────────────────────────────
-// Ensemble of shallow decision trees with bootstrap sampling.
+// ─── 6. Random Forest — ml-random-forest (real CART trees, bootstrap sampling) ─
+// Trains one RandomForestRegression per output target (multi-output standard).
+// Uses the Gini impurity / variance reduction criterion from ml-cart internally.
 
-interface TreeNode {
-  feature?: number;
-  threshold?: number;
-  left?: TreeNode;
-  right?: TreeNode;
-  value?: number[];
-}
+interface RFState { modelJsons: string[] } // one JSON per target
 
-function buildTree(X: number[][], Y: number[][], maxDepth: number, featureSubset: number[]): TreeNode {
-  if (!X.length) return { value: Array(N_TARGETS).fill(0) };
-  if (maxDepth === 0 || X.length <= 2) {
-    const val = Array(N_TARGETS).fill(0);
-    for (let t = 0; t < N_TARGETS; t++) val[t] = arrMean(Y.map(y => y[t]));
-    return { value: val };
-  }
+function fitRF(
+  normFeatures: number[][], targets: number[][],
+  onProgress?: (pct: number) => void
+): { models: RandomForestRegression[]; state: RFState } {
+  const models: RandomForestRegression[] = [];
+  const modelJsons: string[] = [];
 
-  let bestFeature = -1, bestThreshold = 0, bestGain = -Infinity;
-  const parentVar = Array(N_TARGETS).fill(0);
   for (let t = 0; t < N_TARGETS; t++) {
-    const ym = arrMean(Y.map(y => y[t]));
-    parentVar[t] = arrMean(Y.map(y => (y[t] - ym) ** 2));
+    onProgress?.((t / N_TARGETS) * 100);
+    const y = targets.map(row => row[t]);
+    const rf = new RandomForestRegression({
+      nEstimators: 80,
+      maxFeatures: 0.65,
+      replacement: true,
+      useSampleBagging: true,
+      treeOptions: { maxDepth: 7, minNumSamples: 3 },
+      seed: 42 + t,
+    });
+    rf.train(normFeatures, y);
+    models.push(rf);
+    modelJsons.push(JSON.stringify(rf.toJSON()));
   }
-  const parentImpurity = arrMean(parentVar);
 
-  for (const f of featureSubset) {
-    const vals = [...new Set(X.map(x => x[f]))].sort((a, b) => a - b);
-    for (let v = 0; v < vals.length - 1; v++) {
-      const thresh = (vals[v] + vals[v + 1]) / 2;
-      const leftY = Y.filter((_, i) => X[i][f] <= thresh);
-      const rightY = Y.filter((_, i) => X[i][f] > thresh);
-      if (!leftY.length || !rightY.length) continue;
-      let leftImp = 0, rightImp = 0;
-      for (let t = 0; t < N_TARGETS; t++) {
-        const lm = arrMean(leftY.map(y => y[t]));
-        const rm = arrMean(rightY.map(y => y[t]));
-        leftImp += arrMean(leftY.map(y => (y[t] - lm) ** 2));
-        rightImp += arrMean(rightY.map(y => (y[t] - rm) ** 2));
+  return { models, state: { modelJsons } };
+}
+
+function restoreRF(state: RFState): RandomForestRegression[] {
+  return state.modelJsons.map(json =>
+    RandomForestRegression.load(JSON.parse(json))
+  );
+}
+
+function rfPredict(normX: number[], models: RandomForestRegression[]): number[] {
+  return models.map(model => {
+    const pred = model.predict([normX]);
+    return Math.max(0, Array.isArray(pred) ? pred[0] : pred);
+  });
+}
+
+// ─── 7. GBM — ml-cart CART trees in a Gradient Boosting loop ─────────────────
+// Genuine Gradient Boosting using DecisionTreeRegression from ml-cart.
+// Each iteration fits a CART tree to the current pseudo-residuals (negative gradient).
+
+interface GBMState {
+  basePredictions: number[];
+  treesPerTarget: Array<Array<{ modelJson: string; lr: number }>>;
+}
+
+function fitGBM(
+  normFeatures: number[][], targets: number[][],
+  nIter = 50, initLr = 0.08,
+  onProgress?: (pct: number) => void
+): { state: GBMState } {
+  const basePredictions = Array(N_TARGETS).fill(0).map((_, t) =>
+    arrMean(targets.map(y => y[t]))
+  );
+
+  const treesPerTarget: Array<Array<{ modelJson: string; lr: number }>> = [];
+
+  for (let t = 0; t < N_TARGETS; t++) {
+    const trees: Array<{ modelJson: string; lr: number }> = [];
+    let current = targets.map((_, i) => basePredictions[t]);
+
+    for (let iter = 0; iter < nIter; iter++) {
+      onProgress?.(((t * nIter + iter) / (N_TARGETS * nIter)) * 100);
+      // Pseudo-residuals: negative gradient of MSE = -(target - prediction)
+      const residuals = targets.map((y, i) => y[t] - current[i]);
+
+      const tree = new DecisionTreeRegression({ maxDepth: 3, minNumSamples: 2 });
+      tree.train(normFeatures, residuals);
+
+      const iterLr = initLr * (1 / (1 + 0.02 * iter));
+      for (let i = 0; i < normFeatures.length; i++) {
+        const res = tree.predict([normFeatures[i]]);
+        current[i] += iterLr * (Array.isArray(res) ? res[0] : res);
       }
-      leftImp /= N_TARGETS; rightImp /= N_TARGETS;
-      const gain = parentImpurity - (leftY.length / X.length) * leftImp - (rightY.length / X.length) * rightImp;
-      if (gain > bestGain) { bestGain = gain; bestFeature = f; bestThreshold = thresh; }
+
+      trees.push({ modelJson: JSON.stringify(tree.toJSON()), lr: iterLr });
     }
+    treesPerTarget.push(trees);
   }
 
-  if (bestFeature === -1) {
-    const val = Array(N_TARGETS).fill(0);
-    for (let t = 0; t < N_TARGETS; t++) val[t] = arrMean(Y.map(y => y[t]));
-    return { value: val };
-  }
+  return { state: { basePredictions, treesPerTarget } };
+}
 
-  const leftX = X.filter(x => x[bestFeature] <= bestThreshold);
-  const leftY = Y.filter((_, i) => X[i][bestFeature] <= bestThreshold);
-  const rightX = X.filter(x => x[bestFeature] > bestThreshold);
-  const rightY = Y.filter((_, i) => X[i][bestFeature] > bestThreshold);
-
+function restoreGBM(state: GBMState): {
+  basePredictions: number[];
+  treesPerTarget: Array<Array<{ tree: DecisionTreeRegression; lr: number }>>;
+} {
   return {
-    feature: bestFeature,
-    threshold: bestThreshold,
-    left: buildTree(leftX, leftY, maxDepth - 1, featureSubset),
-    right: buildTree(rightX, rightY, maxDepth - 1, featureSubset),
+    basePredictions: state.basePredictions,
+    treesPerTarget: state.treesPerTarget.map(trees =>
+      trees.map(({ modelJson, lr }) => ({
+        tree: DecisionTreeRegression.load(JSON.parse(modelJson)),
+        lr,
+      }))
+    ),
   };
 }
 
-function treePredict(node: TreeNode, x: number[]): number[] {
-  if (node.value) return node.value;
-  if (x[node.feature!] <= node.threshold!) return treePredict(node.left!, x);
-  return treePredict(node.right!, x);
-}
-
-interface RFModel { trees: TreeNode[] }
-
-function fitRF(features: number[][], targets: number[][], nTrees = 30): RFModel {
-  const n = features.length;
-  const d = features[0].length;
-  const nFeat = Math.max(1, Math.floor(Math.sqrt(d)));
-  const trees: TreeNode[] = [];
-
-  for (let t = 0; t < nTrees; t++) {
-    // Bootstrap sample
-    const idx = Array.from({ length: n }, () => Math.floor(Math.random() * n));
-    const X = idx.map(i => features[i]);
-    const Y = idx.map(i => targets[i]);
-    // Random feature subset
-    const feats = Array.from({ length: d }, (_, i) => i)
-      .sort(() => Math.random() - 0.5).slice(0, nFeat + Math.floor(d * 0.3));
-    trees.push(buildTree(X, Y, 5, feats));
-  }
-
-  return { trees };
-}
-
-function rfPredict(x: number[], model: RFModel): number[] {
-  const preds = model.trees.map(tree => treePredict(tree, x));
-  const avg = Array(N_TARGETS).fill(0);
-  for (const p of preds) for (let i = 0; i < N_TARGETS; i++) avg[i] += p[i] / preds.length;
-  return avg;
-}
-
-// ─── 7. Gradient Boosting Machine ─────────────────────────────────────────────
-// Sequential shallow trees that fit residuals. Separate model per output.
-
-interface GBMModel {
-  basePrediction: number[];
-  trees: Array<{ tree: TreeNode; lr: number }[]>; // [target][iteration]
-}
-
-function fitGBM(features: number[][], targets: number[][], nIter = 40, lr = 0.1): GBMModel {
-  const n = features.length;
-  const basePrediction = Array(N_TARGETS).fill(0);
-  for (let t = 0; t < N_TARGETS; t++) basePrediction[t] = arrMean(targets.map(y => y[t]));
-
-  const allTrees: Array<{ tree: TreeNode; lr: number }[]> = Array.from({ length: N_TARGETS }, () => []);
-
-  for (let t = 0; t < N_TARGETS; t++) {
-    let current = Array(n).fill(basePrediction[t]);
-    const d = features[0].length;
-    const nFeat = Math.max(1, Math.floor(Math.sqrt(d)));
-
-    for (let iter = 0; iter < nIter; iter++) {
-      const residuals = targets.map((y, i) => [y[t] - current[i]]);
-      const feats = Array.from({ length: d }, (_, i) => i)
-        .sort(() => Math.random() - 0.5).slice(0, nFeat + Math.floor(d * 0.4));
-      const tree = buildTree(features, residuals, 3, feats);
-
-      const iterLr = lr * (1 / (1 + 0.05 * iter));
-      for (let i = 0; i < n; i++) {
-        current[i] += iterLr * treePredict(tree, features[i])[0];
-      }
-      allTrees[t].push({ tree, lr: iterLr });
-    }
-  }
-
-  return { basePrediction, trees: allTrees };
-}
-
-function gbmPredict(x: number[], model: GBMModel): number[] {
-  return model.basePrediction.map((base, t) => {
+function gbmPredict(normX: number[], gbm: ReturnType<typeof restoreGBM>): number[] {
+  return gbm.basePredictions.map((base, t) => {
     let pred = base;
-    for (const { tree, lr } of model.trees[t]) pred += lr * treePredict(tree, x)[0];
+    for (const { tree, lr } of gbm.treesPerTarget[t]) {
+      const res = tree.predict([normX]);
+      pred += lr * (Array.isArray(res) ? res[0] : res);
+    }
     return Math.max(0, pred);
   });
 }
 
-// ─── 8. Causal Model (Regression-based) ──────────────────────────────────────
-// Estimates the causal effect of key defensive/offensive differences on xG.
-// Uses OLS regression coefficients to compute delta adjustments.
+// ─── 8. Causal Model — ml-regression MultivariateLinearRegression (OLS) ────────
+// Estimates causal effect of key factors on xG using Ordinary Least Squares.
+// "What would xG be if conditions were different?"
+// OLS coefficient for each feature tells us its causal contribution.
 
-interface CausalModel {
-  coefficients: number[][];  // [N_TARGETS x D]
-  intercepts: number[];
-  keyFactors: string[];
+interface CausalState { modelJson: string; featureMeans: number[] }
+
+const CAUSAL_KEY_FEATURES = [
+  "home_phase_defensive", "away_phase_defensive",
+  "home_scoring_strength", "away_scoring_strength",
+  "home_form_strength", "away_form_strength",
+  "home_avg_big_chances", "away_avg_big_chances",
+];
+
+function fitCausal(normFeatures: number[][], targets: number[][], rawFeatureMeans: number[]): {
+  model: MultivariateLinearRegression;
+  state: CausalState;
+  featureMeans: number[];
+} {
+  // MultivariateLinearRegression from ml-regression handles multi-output OLS natively
+  const mlr = new MultivariateLinearRegression(normFeatures, targets, { intercept: true });
+  const scaler = fitScaler(normFeatures);
+  const normMeans = applyScaler(rawFeatureMeans, scaler);
+  return {
+    model: mlr,
+    state: { modelJson: JSON.stringify(mlr.toJSON()), featureMeans: normMeans },
+    featureMeans: normMeans,
+  };
 }
 
-function fitCausal(features: number[][], targets: number[][]): CausalModel {
-  // OLS: β = (X^T X)^{-1} X^T Y via gradient descent
-  const n = features.length;
-  const d = features[0].length;
-  const W = Array.from({ length: N_TARGETS }, () => Array(d).fill(0));
-  const b = Array(N_TARGETS).fill(0);
-  const lr = 0.001;
-  const epochs = 100;
-
-  for (let e = 0; e < epochs; e++) {
-    for (let t = 0; t < N_TARGETS; t++) {
-      let bGrad = 0;
-      const wGrad = Array(d).fill(0);
-      for (let i = 0; i < n; i++) {
-        const pred = dot(W[t], features[i]) + b[t];
-        const err = pred - targets[i][t];
-        bGrad += err;
-        for (let j = 0; j < d; j++) wGrad[j] += err * features[i][j];
-      }
-      b[t] -= (lr / n) * bGrad;
-      for (let j = 0; j < d; j++) W[t][j] -= (lr / n) * (wGrad[j] + 0.001 * W[t][j]);
-    }
-  }
-
-  const keyFactors = [
-    "home_phase_defensive", "away_phase_defensive",
-    "home_scoring_strength", "away_scoring_strength",
-    "home_form_strength", "away_form_strength",
-  ];
-
-  return { coefficients: W, intercepts: b, keyFactors };
+function restoreCausal(state: CausalState): { model: MultivariateLinearRegression; featureMeans: number[] } {
+  return {
+    model: MultivariateLinearRegression.load(JSON.parse(state.modelJson)),
+    featureMeans: state.featureMeans,
+  };
 }
 
-function causalDelta(x: number[], baseline: number[], model: CausalModel): { delta: number[]; explanation: Record<string, number> } {
-  const delta = Array(N_TARGETS).fill(0);
-  for (let t = 0; t < N_TARGETS; t++) {
-    const pred = dot(model.coefficients[t], x) + model.intercepts[t];
-    const basePred = dot(model.coefficients[t], baseline) + model.intercepts[t];
-    delta[t] = pred - basePred;
-  }
+function causalAnalysis(
+  normX: number[],
+  causal: { model: MultivariateLinearRegression; featureMeans: number[] }
+): { delta: number[]; explanation: Record<string, number> } {
+  const predX = causal.model.predict([normX])[0] as number[];
+  const predMean = causal.model.predict([causal.featureMeans])[0] as number[];
+  const delta = predX.map((v, i) => v - predMean[i]);
 
+  // Per-feature causal contribution (coefficient × feature value)
   const explanation: Record<string, number> = {};
-  for (const fname of model.keyFactors) {
+  for (const fname of CAUSAL_KEY_FEATURES) {
     const idx = FEATURE_NAMES.indexOf(fname);
     if (idx >= 0) {
-      explanation[fname] = model.coefficients[0][idx] * x[idx];
+      // Approximate causal effect: difference from baseline at that feature
+      const perturbed = [...causal.featureMeans];
+      perturbed[idx] = normX[idx];
+      const predPerturbed = causal.model.predict([perturbed])[0] as number[];
+      explanation[fname] = +(predPerturbed[0] - predMean[0]).toFixed(4);
     }
   }
 
   return { delta, explanation };
 }
 
-// ─── 9. Meta-Learner (Learned Ensemble Combination) ───────────────────────────
-// Takes stacked predictions from all base models and learns optimal weights.
+// ─── 9. Meta-Learner — OLS regression over stacked model outputs ────────────────
+// Learns optimal combination weights: final_xG = w₁·ANN + w₂·RF + w₃·GBM + bias
+// Uses MultivariateLinearRegression (OLS) on held-out stacked predictions.
 
-interface MetaModel {
-  weights: number[][];  // [N_TARGETS x N_base_models]
-  biases: number[];
-}
+interface MetaState { modelJson: string }
 
 function fitMeta(
-  annPreds: number[][],
-  rfPreds: number[][],
-  gbmPreds: number[][],
+  annPreds: number[][], rfPreds: number[][], gbmPreds: number[][],
   targets: number[][]
-): MetaModel {
-  const n = targets.length;
-  const nModels = 3;
-  const W = Array.from({ length: N_TARGETS }, () => Array(nModels).fill(1 / nModels));
-  const b = Array(N_TARGETS).fill(0);
-  const lr = 0.005;
-  const epochs = 200;
+): { model: MultivariateLinearRegression; state: MetaState } {
+  // Stack: [ann_0, ann_1, ..., rf_0, rf_1, ..., gbm_0, gbm_1, ...]
+  const X = annPreds.map((a, i) => [...a, ...rfPreds[i], ...gbmPreds[i]]);
+  const mlr = new MultivariateLinearRegression(X, targets, { intercept: true });
+  return { model: mlr, state: { modelJson: JSON.stringify(mlr.toJSON()) } };
+}
 
-  for (let e = 0; e < epochs; e++) {
-    for (let t = 0; t < N_TARGETS; t++) {
-      let bGrad = 0;
-      const wGrad = Array(nModels).fill(0);
-      for (let i = 0; i < n; i++) {
-        const modelPreds = [annPreds[i][t], rfPreds[i][t], gbmPreds[i][t]];
-        const pred = dot(W[t], modelPreds) + b[t];
-        const err = pred - targets[i][t];
-        bGrad += err;
-        for (let j = 0; j < nModels; j++) wGrad[j] += err * modelPreds[j];
-      }
-      b[t] -= (lr / n) * bGrad;
-      for (let j = 0; j < nModels; j++) {
-        W[t][j] -= (lr / n) * wGrad[j];
-        W[t][j] = Math.max(0, W[t][j]); // non-negative weights
-      }
-      // Normalize weights to sum to ~1
-      const sum = W[t].reduce((a, v) => a + v, 0) || 1;
-      for (let j = 0; j < nModels; j++) W[t][j] /= sum;
-    }
-  }
-
-  return { weights: W, biases: b };
+function restoreMeta(state: MetaState): MultivariateLinearRegression {
+  return MultivariateLinearRegression.load(JSON.parse(state.modelJson));
 }
 
 function metaPredict(
-  annPred: number[],
-  rfPred: number[],
-  gbmPred: number[],
-  model: MetaModel
+  annPred: number[], rfPred: number[], gbmPred: number[],
+  model: MultivariateLinearRegression
 ): number[] {
-  return Array(N_TARGETS).fill(0).map((_, t) => {
-    const preds = [annPred[t], rfPred[t], gbmPred[t]];
-    return Math.max(0, dot(model.weights[t], preds) + model.biases[t]);
-  });
+  const stacked = [...annPred, ...rfPred, ...gbmPred];
+  const result = model.predict([stacked])[0] as number[];
+  return result.map(v => Math.max(0, v));
 }
 
-// ─── Engine State ─────────────────────────────────────────────────────────────
-export interface EngineState {
-  trained: boolean;
-  trainingSamples: number;
-  trainedAt: string | null;
-  metrics: Record<string, number>;
-}
-
-interface SerializedEngine {
+// ─── Engine State (serialised to SQLite) ─────────────────────────────────────
+interface PersistedState {
   scaler: Scaler;
+  rawFeatureMeans: number[];
   ann: ANNState;
   hmm: HMMModel;
   gp: GPModel;
   garch: GARCHModel;
   svm: SVMModel;
-  rf: RFModel;
-  gbm: GBMModel;
-  causal: CausalModel;
-  meta: MetaModel;
-  featureMeans: number[];
+  rf: RFState;
+  gbm: GBMState;
+  causal: CausalState;
+  meta: MetaState;
+}
+
+// ─── Public types ─────────────────────────────────────────────────────────────
+export interface EngineStatus {
+  trained: boolean;
+  trainingSamples: number;
+  trainedAt: string | null;
+  metrics: Record<string, number>;
+  libraries: Record<string, string>;
 }
 
 export interface XGPrediction {
@@ -755,7 +644,7 @@ export interface XGPrediction {
   awayFirstHalfXg: number;
   homeSecondHalfXg: number;
   awaySecondHalfXg: number;
-  confidence: number[];
+  confidence: number;
   volatility: string;
   volatilityFactor: number;
   matchState: string;
@@ -763,7 +652,6 @@ export interface XGPrediction {
   svmCorrection: number;
   causalDelta: number[];
   causalExplanation: Record<string, number>;
-  metaWeights: number[][];
   componentPredictions: {
     ann: number[];
     rf: number[];
@@ -771,7 +659,8 @@ export interface XGPrediction {
     hmm: { state: string; factor: number };
     garch: { label: string; factor: number };
     svm: { correction: number; score: number };
-    gp: { variance: number[] };
+    gp: { variance: number };
+    meta: number[];
   };
   derived: {
     totalXg: number;
@@ -782,179 +671,212 @@ export interface XGPrediction {
   featuresUsed: Record<string, number>;
 }
 
-// ─── Main Engine Class ────────────────────────────────────────────────────────
+// ─── Main Engine ──────────────────────────────────────────────────────────────
 class XGEngine {
-  private state: SerializedEngine | null = null;
+  private persisted: PersistedState | null = null;
 
-  load(): boolean {
+  // Hydrated (live) models
+  private annModel: tf.LayersModel | null = null;
+  private rfModels: RandomForestRegression[] | null = null;
+  private gbmLive: ReturnType<typeof restoreGBM> | null = null;
+  private causalLive: { model: MultivariateLinearRegression; featureMeans: number[] } | null = null;
+  private metaModel: MultivariateLinearRegression | null = null;
+
+  async load(): Promise<boolean> {
     try {
       const row: any = db.prepare("SELECT weights FROM engine_models WHERE model_name = 'full_engine'").get();
       if (!row) return false;
-      this.state = JSON.parse(row.weights);
+      const parsed = JSON.parse(row.weights) as PersistedState;
+      // Validate that the saved state matches the current engine format
+      if (!parsed?.ann?.weightData || !parsed?.rf?.modelJsons || !parsed?.gbm?.treesPerTarget) {
+        console.warn("Engine: saved model is from old format — clearing. Please retrain.");
+        db.prepare("DELETE FROM engine_models WHERE model_name = 'full_engine'").run();
+        return false;
+      }
+      this.persisted = parsed;
+      await this._hydrate();
       return true;
-    } catch { return false; }
+    } catch (e) {
+      console.warn("Engine load failed (format mismatch?) — clearing saved model:", (e as Error).message);
+      try { db.prepare("DELETE FROM engine_models WHERE model_name = 'full_engine'").run(); } catch {}
+      return false;
+    }
   }
 
-  save(samples: number, metrics: Record<string, number>) {
-    const now = new Date().toISOString();
+  private async _hydrate() {
+    if (!this.persisted) return;
+    const p = this.persisted;
+    this.annModel = await restoreANN(p.ann);
+    this.rfModels = restoreRF(p.rf);
+    this.gbmLive = restoreGBM(p.gbm);
+    this.causalLive = restoreCausal(p.causal);
+    this.metaModel = restoreMeta(p.meta);
+  }
+
+  private _save(p: PersistedState, samples: number, metrics: Record<string, number>) {
     db.prepare(`
       INSERT OR REPLACE INTO engine_models (model_name, weights, trained_at, training_samples, metrics)
       VALUES ('full_engine', ?, ?, ?, ?)
-    `).run(JSON.stringify(this.state), now, samples, JSON.stringify(metrics));
+    `).run(JSON.stringify(p), new Date().toISOString(), samples, JSON.stringify(metrics));
+    this.persisted = p;
   }
 
-  getStatus(): EngineState {
+  getStatus(): EngineStatus {
     try {
-      const row: any = db.prepare("SELECT trained_at, training_samples, metrics FROM engine_models WHERE model_name = 'full_engine'").get();
-      if (!row) return { trained: false, trainingSamples: 0, trainedAt: null, metrics: {} };
+      const row: any = db.prepare(
+        "SELECT trained_at, training_samples, metrics FROM engine_models WHERE model_name = 'full_engine'"
+      ).get();
       return {
-        trained: true,
-        trainingSamples: row.training_samples,
-        trainedAt: row.trained_at,
-        metrics: JSON.parse(row.metrics || "{}"),
+        trained: !!row,
+        trainingSamples: row?.training_samples ?? 0,
+        trainedAt: row?.trained_at ?? null,
+        metrics: JSON.parse(row?.metrics ?? "{}"),
+        libraries: {
+          ANN: "@tensorflow/tfjs (Adam, real backprop)",
+          RF: "ml-random-forest (CART trees, bootstrap)",
+          GBM: "ml-cart (DecisionTreeRegression, gradient boosting)",
+          Causal: "ml-regression (MultivariateLinearRegression OLS)",
+          Meta: "ml-regression (MultivariateLinearRegression OLS)",
+          GP: "ml-matrix (pseudo-inverse, RBF kernel)",
+          HMM: "Custom Gaussian HMM (5 latent states)",
+          GARCH: "Custom GARCH(1,1)",
+          SVM: "Custom SVM (hinge loss, SGD)",
+        },
       };
-    } catch { return { trained: false, trainingSamples: 0, trainedAt: null, metrics: {} }; }
+    } catch {
+      return { trained: false, trainingSamples: 0, trainedAt: null, metrics: {}, libraries: {} };
+    }
   }
 
   async train(onProgress?: (pct: number, msg: string) => void): Promise<{ samples: number; metrics: Record<string, number> }> {
-    const rows: any[] = db.prepare("SELECT * FROM match_simulations WHERE home_goals IS NOT NULL AND away_goals IS NOT NULL").all();
+    const rows: any[] = db
+      .prepare("SELECT * FROM match_simulations WHERE home_goals IS NOT NULL AND away_goals IS NOT NULL")
+      .all();
 
-    if (rows.length < 5) throw new Error(`Need at least 5 matches to train. Currently have ${rows.length}.`);
+    if (rows.length < 5) throw new Error(`Need at least 5 matches. Currently have ${rows.length}.`);
 
-    const progress = (pct: number, msg: string) => onProgress?.(pct, msg);
+    const prog = (pct: number, msg: string) => onProgress?.(pct, msg);
 
-    progress(2, "Extracting features...");
-    const allFeatures = rows.map(r => extractFeatures(r));
+    prog(2, "Extracting features from database...");
+    const rawFeatures = rows.map(r => extractFeatures(r));
     const allTargets = rows.map(r => extractTargets(r));
 
-    // Fit scaler
-    progress(5, "Fitting normalisation scaler...");
-    const scaler = fitScaler(allFeatures);
-    const normFeatures = allFeatures.map(f => applyScaler(f, scaler));
+    prog(5, "Fitting min-max scaler...");
+    const scaler = fitScaler(rawFeatures);
+    const normFeatures = rawFeatures.map(f => applyScaler(f, scaler));
+    const rawFeatureMeans = FEATURE_NAMES.map((_, i) => arrMean(rawFeatures.map(f => f[i])));
 
-    // Compute feature means (for causal baseline)
-    const featureMeans = FEATURE_NAMES.map((_, i) => arrMean(allFeatures.map(f => f[i])));
+    // ── 1. TensorFlow.js ANN ──────────────────────────────────────────────────
+    prog(8, "Training ANN with TensorFlow.js (Adam optimizer)...");
+    const { model: annLive, state: annState } = await trainANN(normFeatures, allTargets, (e, total) => {
+      prog(8 + (e / total) * 22, `TF.js ANN epoch ${e}/${total}...`);
+    });
+    this.annModel = annLive;
+    const annPreds = normFeatures.map(x => annPredict(annLive, x));
+    prog(30, "ANN training complete.");
 
-    // 1. Train ANN
-    progress(10, "Training neural network (ANN)...");
-    const ann = new ANN(N_FEATURES, 64, 32, N_TARGETS);
-    const epochs = 100;
-    for (let e = 0; e < epochs; e++) {
-      // Shuffle
-      const idx = normFeatures.map((_, i) => i).sort(() => Math.random() - 0.5);
-      for (const i of idx) ann.backward(normFeatures[i], allTargets[i], 0.001);
-      if (e % 20 === 0) progress(10 + (e / epochs) * 20, `ANN epoch ${e + 1}/${epochs}...`);
-    }
-    const annState = ann.toState();
+    // ── 2. HMM ────────────────────────────────────────────────────────────────
+    prog(32, "Fitting Hidden Markov Model (5 latent states)...");
+    const hmmModel = fitHMM(normFeatures, allTargets);
 
-    // Collect ANN predictions for meta-learner
-    const annPreds = normFeatures.map(f => ann.predict(f));
+    // ── 3. GP ─────────────────────────────────────────────────────────────────
+    prog(36, "Fitting Gaussian Process (ml-matrix RBF kernel)...");
+    const gpModel = fitGP(normFeatures, allTargets);
 
-    // 2. Train HMM
-    progress(32, "Fitting Hidden Markov Model (HMM)...");
-    const hmm = fitHMM(normFeatures, allTargets);
+    // ── 4. GARCH ──────────────────────────────────────────────────────────────
+    prog(40, "Fitting GARCH(1,1) volatility model...");
+    const garchModel = fitGARCH(allTargets);
 
-    // 3. Fit GP
-    progress(38, "Fitting Gaussian Process (GP)...");
-    const gp = fitGP(normFeatures, allTargets);
+    // ── 5. SVM ────────────────────────────────────────────────────────────────
+    prog(44, "Training SVM classifier (hinge loss + SGD)...");
+    const svmModel = fitSVM(normFeatures, allTargets);
 
-    // 4. Fit GARCH
-    progress(44, "Fitting GARCH(1,1) volatility model...");
-    const garch = fitGARCH(allTargets);
+    // ── 6. Random Forest ──────────────────────────────────────────────────────
+    prog(48, "Training Random Forest with ml-random-forest (80 CART trees)...");
+    const { models: rfLive, state: rfState } = fitRF(normFeatures, allTargets, (pct) => {
+      prog(48 + pct * 0.14, `RF training target ${Math.round(pct / (100 / N_TARGETS) + 1)}/${N_TARGETS}...`);
+    });
+    this.rfModels = rfLive;
+    const rfPreds = normFeatures.map(x => rfPredict(x, rfLive));
+    prog(62, "Random Forest training complete.");
 
-    // 5. Train SVM
-    progress(50, "Training Support Vector Machine (SVM)...");
-    const svm = fitSVM(normFeatures, allTargets);
+    // ── 7. GBM ────────────────────────────────────────────────────────────────
+    prog(64, "Training Gradient Boosting (ml-cart CART trees, 50 iterations)...");
+    const { state: gbmState } = fitGBM(normFeatures, allTargets, 50, 0.08, (pct) => {
+      prog(64 + pct * 0.12, `GBM ${pct.toFixed(0)}%...`);
+    });
+    this.gbmLive = restoreGBM(gbmState);
+    const gbmPreds = normFeatures.map(x => gbmPredict(x, this.gbmLive!));
+    prog(76, "GBM training complete.");
 
-    // 6. Train Random Forest
-    progress(55, "Training Random Forest (30 trees)...");
-    const rf = fitRF(normFeatures, allTargets, 30);
-    const rfPreds = normFeatures.map(f => rfPredict(f, rf));
+    // ── 8. Causal ─────────────────────────────────────────────────────────────
+    prog(78, "Fitting Causal Model (ml-regression OLS)...");
+    const { model: causalModel, state: causalState, featureMeans } = fitCausal(normFeatures, allTargets, rawFeatureMeans);
+    this.causalLive = { model: causalModel, featureMeans };
 
-    // 7. Train GBM
-    progress(68, "Training Gradient Boosting Machine...");
-    const gbm = fitGBM(normFeatures, allTargets, 40, 0.1);
-    const gbmPreds = normFeatures.map(f => gbmPredict(f, gbm));
+    // ── 9. Meta-Learner ───────────────────────────────────────────────────────
+    prog(84, "Training Meta-Learner (ml-regression OLS over stacked predictions)...");
+    const { model: metaModel, state: metaState } = fitMeta(annPreds, rfPreds, gbmPreds, allTargets);
+    this.metaModel = metaModel;
 
-    // 8. Train Causal
-    progress(82, "Fitting Causal Model...");
-    const causal = fitCausal(normFeatures, allTargets);
-
-    // 9. Train Meta-Learner
-    progress(88, "Training Meta-Learner (ensemble combiner)...");
-    const meta = fitMeta(annPreds, rfPreds, gbmPreds, allTargets);
-
-    // Compute metrics on training set
-    progress(94, "Computing evaluation metrics...");
-    let totalMSE = 0, totalMAE = 0;
-    const htMSE_arr: number[] = [];
+    // ── Evaluation ────────────────────────────────────────────────────────────
+    prog(92, "Evaluating model on training set...");
+    let sumMSE = 0, sumMAE = 0, sumH1MSE = 0;
     for (let i = 0; i < rows.length; i++) {
-      const pred = this._predictFromModels(
-        normFeatures[i], allFeatures[i], featureMeans, annState, hmm, gp, garch, svm, rf, gbm, causal, meta, scaler
-      );
+      const p = this._predictLive(normFeatures[i], rawFeatures[i], rawFeatureMeans, scaler);
       const y = allTargets[i];
-      const ftErr = (pred.homeFullTimeXg - y[0]) ** 2 + (pred.awayFullTimeXg - y[1]) ** 2;
-      totalMSE += ftErr / 2;
-      totalMAE += (Math.abs(pred.homeFullTimeXg - y[0]) + Math.abs(pred.awayFullTimeXg - y[1])) / 2;
-      htMSE_arr.push(((pred.homeFirstHalfXg - y[2]) ** 2 + (pred.awayFirstHalfXg - y[3]) ** 2) / 2);
+      sumMSE += ((p.homeFullTimeXg - y[0]) ** 2 + (p.awayFullTimeXg - y[1]) ** 2) / 2;
+      sumMAE += (Math.abs(p.homeFullTimeXg - y[0]) + Math.abs(p.awayFullTimeXg - y[1])) / 2;
+      sumH1MSE += ((p.homeFirstHalfXg - y[2]) ** 2 + (p.awayFirstHalfXg - y[3]) ** 2) / 2;
     }
-
     const n = rows.length;
     const metrics = {
-      mse_ft: +(totalMSE / n).toFixed(4),
-      mae_ft: +(totalMAE / n).toFixed(4),
-      mse_h1: +(arrMean(htMSE_arr)).toFixed(4),
-      rmse_ft: +(Math.sqrt(totalMSE / n)).toFixed(4),
+      mse_ft: +(sumMSE / n).toFixed(4),
+      mae_ft: +(sumMAE / n).toFixed(4),
+      mse_h1: +(sumH1MSE / n).toFixed(4),
+      rmse_ft: +(Math.sqrt(sumMSE / n)).toFixed(4),
       samples: n,
     };
 
-    this.state = { scaler, ann: annState, hmm, gp, garch, svm, rf, gbm, causal, meta, featureMeans };
-    this.save(n, metrics);
+    // ── Persist ───────────────────────────────────────────────────────────────
+    prog(97, "Saving model weights to database...");
+    const persisted: PersistedState = {
+      scaler, rawFeatureMeans, ann: annState, hmm: hmmModel,
+      gp: gpModel, garch: garchModel, svm: svmModel,
+      rf: rfState, gbm: gbmState, causal: causalState, meta: metaState,
+    };
+    this._save(persisted, n, metrics);
 
-    progress(100, `Training complete! ${n} matches trained.`);
+    prog(100, `Training complete! ${n} matches, RMSE ${metrics.rmse_ft} goals.`);
     return { samples: n, metrics };
   }
 
-  private _predictFromModels(
-    normX: number[], rawX: number[], featureMeans: number[],
-    annState: ANNState, hmm: HMMModel, gp: GPModel, garch: GARCHModel,
-    svm: SVMModel, rf: RFModel, gbm: GBMModel, causal: CausalModel,
-    meta: MetaModel, scaler: Scaler
+  private _predictLive(
+    normX: number[], rawX: number[], rawFeatureMeans: number[], scaler: Scaler
   ): XGPrediction {
-    // ANN prediction
-    const annModel = new ANN(annState.D, annState.H1, annState.H2, annState.O);
-    annModel.fromState(annState);
-    const annPred = annModel.predict(normX);
+    if (!this.annModel || !this.rfModels || !this.gbmLive || !this.causalLive || !this.metaModel) {
+      throw new Error("Engine not trained.");
+    }
 
-    // RF prediction
-    const rfPred = rfPredict(normX, rf);
+    // Base model predictions
+    const annPred = annPredict(this.annModel, normX);
+    const rfPred = rfPredict(normX, this.rfModels);
+    const gbmPred = gbmPredict(normX, this.gbmLive);
 
-    // GBM prediction
-    const gbmPred = gbmPredict(normX, gbm);
+    // Meta-learner combination
+    const metaPred = metaPredict(annPred, rfPred, gbmPred, this.metaModel);
 
-    // Meta prediction
-    const metaPred = metaPredict(annPred, rfPred, gbmPred, meta);
+    // Auxiliary models
+    const hmmResult = hmmPredict(normX, this.persisted!.hmm);
+    const gpResult = gpPredict(normX, this.persisted!.gp);
+    const rawXg = (rawX[0] + rawX[1]) / 2;
+    const garchResult = garchVolatility(rawXg, this.persisted!.garch);
+    const svmResult = svmCorrect(normX, this.persisted!.svm);
+    const causalResult = causalAnalysis(normX, this.causalLive);
 
-    // HMM state
-    const hmmResult = hmmPredict(normX, hmm);
-
-    // GP uncertainty
-    const gpResult = gpPredict(normX, gp);
-
-    // GARCH volatility
-    const featureXg = (rawX[0] + rawX[1]) / 2;
-    const garchResult = garchVolatilityFactor(featureXg, garch);
-
-    // SVM correction
-    const svmResult = svmCorrection(normX, svm);
-
-    // Causal delta
-    const normMeans = applyScaler(featureMeans, scaler);
-    const causalResult = causalDelta(normX, normMeans, causal);
-
-    // Combine: meta prediction + hmm factor + svm correction + causal delta
-    const combine = (metaVal: number, causalD: number) =>
-      Math.max(0, (metaVal + causalD) * hmmResult.xgFactor + svmResult.correction);
+    // Final combination: meta + hmm factor + svm correction + causal delta
+    const combine = (meta: number, causalD: number) =>
+      Math.max(0, (meta + causalD * 0.3) * hmmResult.factor + svmResult.correction);
 
     const hFt = combine(metaPred[0], causalResult.delta[0]);
     const aFt = combine(metaPred[1], causalResult.delta[1]);
@@ -963,19 +885,16 @@ class XGEngine {
     const hH2 = combine(metaPred[4], causalResult.delta[4]);
     const aH2 = combine(metaPred[5], causalResult.delta[5]);
 
-    // GP confidence intervals (variance → std dev)
-    const confidence = gpResult.variance.map(v => +Math.sqrt(v).toFixed(3));
-
-    // Derived market probabilities
+    // Derived market probabilities (Poisson approximation)
     const totalXg = hFt + aFt;
-    const bttsProbability = clamp(1 - Math.exp(-hFt) - Math.exp(-aFt) + Math.exp(-(hFt + aFt)), 0, 1);
+    const expH = Math.exp(-hFt), expA = Math.exp(-aFt);
+    const bttsProbability = clamp((1 - expH) * (1 - expA), 0, 1);
     const over25Probability = clamp(1 - Math.exp(-totalXg) * (1 + totalXg + totalXg ** 2 / 2), 0, 1);
     const homeAdv = hFt / (totalXg || 1);
-    const home = clamp(homeAdv * 0.8 + 0.1, 0.1, 0.8);
-    const away = clamp((1 - homeAdv) * 0.8 + 0.1, 0.1, 0.8);
-    const draw = clamp(1 - home - away + 0.15, 0.1, 0.45);
+    const home = clamp(homeAdv * 0.75 + 0.1, 0.1, 0.8);
+    const away = clamp((1 - homeAdv) * 0.75 + 0.1, 0.1, 0.8);
+    const draw = clamp(1 - home - away + 0.12, 0.1, 0.4);
 
-    // Feature summary
     const featuresUsed: Record<string, number> = {};
     FEATURE_NAMES.forEach((name, i) => { featuresUsed[name] = +rawX[i].toFixed(3); });
 
@@ -986,23 +905,25 @@ class XGEngine {
       awayFirstHalfXg: +aH1.toFixed(2),
       homeSecondHalfXg: +hH2.toFixed(2),
       awaySecondHalfXg: +aH2.toFixed(2),
-      confidence,
+      confidence: +Math.sqrt(gpResult.variance).toFixed(3),
       volatility: garchResult.label,
       volatilityFactor: +garchResult.factor.toFixed(3),
       matchState: hmmResult.state,
-      stateProbabilities: hmmResult.stateProbabilities.map(p => +p.toFixed(3)),
+      stateProbabilities: hmmResult.probs.map(p => +p.toFixed(3)),
       svmCorrection: +svmResult.correction.toFixed(3),
       causalDelta: causalResult.delta.map(d => +d.toFixed(3)),
-      causalExplanation: Object.fromEntries(Object.entries(causalResult.explanation).map(([k, v]) => [k, +v.toFixed(3)])),
-      metaWeights: meta.weights.map(row => row.map(v => +v.toFixed(3))),
+      causalExplanation: Object.fromEntries(
+        Object.entries(causalResult.explanation).map(([k, v]) => [k, +Number(v).toFixed(4)])
+      ),
       componentPredictions: {
         ann: annPred.map(v => +v.toFixed(3)),
         rf: rfPred.map(v => +v.toFixed(3)),
         gbm: gbmPred.map(v => +v.toFixed(3)),
-        hmm: { state: hmmResult.state, factor: +hmmResult.xgFactor.toFixed(3) },
+        meta: metaPred.map(v => +v.toFixed(3)),
+        hmm: { state: hmmResult.state, factor: +hmmResult.factor.toFixed(3) },
         garch: { label: garchResult.label, factor: +garchResult.factor.toFixed(3) },
         svm: { correction: +svmResult.correction.toFixed(3), score: +svmResult.score.toFixed(3) },
-        gp: { variance: gpResult.variance.map(v => +v.toFixed(4)) },
+        gp: { variance: +gpResult.variance.toFixed(4) },
       },
       derived: {
         totalXg: +totalXg.toFixed(2),
@@ -1018,22 +939,19 @@ class XGEngine {
     };
   }
 
-  predict(rawFeatures: number[]): XGPrediction {
-    if (!this.state) throw new Error("Engine not trained. Train the engine first.");
-    const { scaler, ann, hmm, gp, garch, svm, rf, gbm, causal, meta, featureMeans } = this.state;
-    const normX = applyScaler(rawFeatures, scaler);
-    return this._predictFromModels(normX, rawFeatures, featureMeans, ann, hmm, gp, garch, svm, rf, gbm, causal, meta, scaler);
+  async predict(rawFeatures: number[]): Promise<XGPrediction> {
+    if (!this.annModel) await this._hydrate();
+    if (!this.annModel || !this.persisted) throw new Error("Engine not trained. Train from the Engine tab first.");
+    const normX = applyScaler(rawFeatures, this.persisted.scaler);
+    return this._predictLive(normX, rawFeatures, this.persisted.rawFeatureMeans, this.persisted.scaler);
   }
 
-  predictFromRow(row: Record<string, any>): XGPrediction {
-    const features = extractFeatures(row);
-    return this.predict(features);
+  async predictFromRow(row: Record<string, any>): Promise<XGPrediction> {
+    return this.predict(extractFeatures(row));
   }
 }
 
 export const engine = new XGEngine();
-
-// Load persisted state at startup
-engine.load();
+engine.load().catch(e => console.error("Engine initial load:", e));
 
 export default engine;

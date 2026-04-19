@@ -1927,12 +1927,12 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   });
 
   // ─── xG Engine: predict for stored match ──────────────────────────────────
-  app.get("/api/engine/predict/:eventId", (req: Request, res: Response) => {
+  app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {
     try {
       const row: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?")
         .get(Number(req.params.eventId));
       if (!row) return res.status(404).json({ error: "Match not found in database" });
-      const prediction = engine.predictFromRow(row);
+      const prediction = await engine.predictFromRow(row);
       res.json({ prediction, matchInfo: {
         homeTeam: row.home_team_name, awayTeam: row.away_team_name,
         homeGoals: row.home_goals, awayGoals: row.away_goals,
@@ -1945,10 +1945,10 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   });
 
   // ─── xG Engine: predict from raw simulation features ──────────────────────
-  app.post("/api/engine/predict-features", (req: Request, res: Response) => {
+  app.post("/api/engine/predict-features", async (req: Request, res: Response) => {
     try {
       const features = req.body as Record<string, any>;
-      const prediction = engine.predictFromRow(features);
+      const prediction = await engine.predictFromRow(features);
       res.json({ prediction });
     } catch (error: any) {
       res.status(500).json({ error: error.message });

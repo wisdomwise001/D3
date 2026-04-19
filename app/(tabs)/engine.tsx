@@ -40,7 +40,7 @@ function MetricCard({ label, value, unit = "" }: { label: string; value: string 
   );
 }
 
-function ModelBadge({ name, description, role, color }: { name: string; description: string; role: string; color: string }) {
+function ModelBadge({ name, description, role, color, lib }: { name: string; description: string; role: string; color: string; lib?: string }) {
   return (
     <View style={[styles.modelBadge, { borderLeftColor: color }]}>
       <View style={styles.modelBadgeHeader}>
@@ -49,21 +49,26 @@ function ModelBadge({ name, description, role, color }: { name: string; descript
           <Text style={[styles.roleTagText, { color }]}>{role}</Text>
         </View>
       </View>
+      {lib && (
+        <View style={styles.libBadge}>
+          <Text style={styles.libBadgeText}>{lib}</Text>
+        </View>
+      )}
       <Text style={styles.modelDescription}>{description}</Text>
     </View>
   );
 }
 
 const MODELS = [
-  { name: "ANN", description: "Artificial Neural Network (2-layer MLP) learns baseline xG from shot quality, possession and team strength patterns.", role: "Baseline xG", color: "#60a5fa" },
-  { name: "HMM", description: "Hidden Markov Model detects latent match states (very_defensive → very_attacking) and adjusts the xG flow accordingly.", role: "Match State", color: "#a78bfa" },
-  { name: "GP", description: "Gaussian Process with RBF kernel quantifies prediction uncertainty via posterior variance — your confidence intervals.", role: "Uncertainty", color: "#34d399" },
-  { name: "GARCH", description: "GARCH(1,1) models time-series goal variance. Detects high-volatility derbies and chaotic matches, scaling risk accordingly.", role: "Volatility", color: "#fbbf24" },
-  { name: "SVM", description: "Support Vector Machine trained with hinge loss provides a boundary correction signal for high/low-scoring game classification.", role: "Correction", color: "#f87171" },
-  { name: "RF", description: "Random Forest of 30 bootstrapped trees with random feature subsets integrates all team stats into a refined xG estimate.", role: "Refinement", color: "#fb923c" },
-  { name: "GBM", description: "Gradient Boosting Machine fits 40 iterations of shallow trees on residuals, progressively reducing prediction error.", role: "Boosting", color: "#e879f9" },
-  { name: "Causal", description: "Regression-based causal model answers 'what changes xG?' by computing delta adjustments from key offensive/defensive factors.", role: "Causality", color: "#2dd4bf" },
-  { name: "Meta", description: "Meta-Learner learns optimal non-negative weights to combine ANN, RF and GBM outputs via gradient descent on held-out data.", role: "Combiner", color: "#94a3b8" },
+  { name: "ANN", description: "@tensorflow/tfjs — Real TensorFlow neural network (D→64→32→6, ReLU activations). Trained with Adam optimizer (adaptive per-parameter learning rates, β₁=0.9 β₂=0.999) for 200 epochs with dropout regularisation. Produces baseline xG for all 6 outputs.", role: "Baseline xG", color: "#60a5fa", lib: "@tensorflow/tfjs" },
+  { name: "HMM", description: "Custom Gaussian HMM with 5 latent match states (very_defensive → very_attacking). States are initialised via sorted goal-output clustering; emissions fit Gaussian distributions per cluster. Viterbi-style decoding outputs the most probable match state and a per-state scaling factor.", role: "Match State", color: "#a78bfa", lib: "Custom Gaussian HMM" },
+  { name: "GP", description: "ml-matrix — Gaussian Process with Squared Exponential (RBF) kernel. Uses median heuristic for length-scale, 60 Nyström inducing points, and ml-matrix pseudo-inverse for the posterior variance: σ²(x*) = k**  − k_*ᵀ K⁻¹ k_*. Reports true epistemic uncertainty.", role: "Uncertainty", color: "#34d399", lib: "ml-matrix" },
+  { name: "GARCH", description: "Custom GARCH(1,1) — σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}. Fits ω, α=0.15, β=0.75 to goal-scoring residuals from the training set. Converts conditional variance into a multiplicative volatility factor (Low / Medium / High).", role: "Volatility", color: "#fbbf24", lib: "Custom GARCH(1,1)" },
+  { name: "SVM", description: "Custom linear SVM: hinge loss (max(0, 1 − y·wᵀx)) + L2 regularisation, trained with SGD over 80 epochs and a decaying learning rate. Classifies matches as high/low-scoring to compute a ±0.25 xG boundary correction signal.", role: "Correction", color: "#f87171", lib: "Custom SVM (hinge+SGD)" },
+  { name: "RF", description: "ml-random-forest — RandomForestRegression with 80 CART trees, bootstrap sampling, 65% random feature subsets, max depth 7. Trains one model per xG output (6 models total), each using proper Gini/MSE variance reduction splits from ml-cart internally.", role: "Refinement", color: "#fb923c", lib: "ml-random-forest" },
+  { name: "GBM", description: "ml-cart — Gradient Boosting with 50 iterations × 6 outputs = 300 DecisionTreeRegression trees (max depth 3). Each iteration fits a CART tree to the pseudo-residuals (negative MSE gradient). Learning rate decays as lr_t = 0.08 / (1 + 0.02t).", role: "Boosting", color: "#e879f9", lib: "ml-cart (CART trees)" },
+  { name: "Causal", description: "ml-regression — MultivariateLinearRegression (OLS via normal equations, not gradient descent). Fits all 38 features → 6 outputs simultaneously. Computes causal Δ by perturbing each key feature from its mean and measuring the change in predicted xG.", role: "Causality", color: "#2dd4bf", lib: "ml-regression (OLS)" },
+  { name: "Meta", description: "ml-regression — MultivariateLinearRegression (OLS) trained on stacked outputs [ANN(×6) · RF(×6) · GBM(×6)] → 18-feature → 6-target. Learns the optimal linear combination across all three base models to minimise residual error on training data.", role: "Combiner", color: "#94a3b8", lib: "ml-regression (OLS)" },
 ];
 
 export default function EngineScreen() {
@@ -310,6 +315,12 @@ const styles = StyleSheet.create({
   modelName: { fontSize: 14, fontFamily: "Inter_700Bold" },
   roleTag: { borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 },
   roleTagText: { fontSize: 10, fontFamily: "Inter_600SemiBold" },
+  libBadge: {
+    alignSelf: "flex-start", backgroundColor: "#1e293b", borderRadius: 6,
+    paddingHorizontal: 7, paddingVertical: 2, marginBottom: 6,
+    borderWidth: 1, borderColor: "#334155",
+  },
+  libBadgeText: { fontSize: 10, fontFamily: "Inter_500Medium", color: "#94a3b8" },
   modelDescription: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, lineHeight: 18 },
   outputSection: { marginBottom: 24 },
   outputRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 10 },
