@@ -1941,20 +1941,19 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
     try {
       const eventId = Number(req.params.eventId);
 
-      // 1. Try database first (completed matches already processed)
-      let row: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
+      // 1. Check DB for match metadata (scores, teams)
+      const dbRow: any = db.prepare("SELECT * FROM match_simulations WHERE event_id = ?").get(eventId);
 
-      // 2. If not in DB, build feature row on-the-fly from team history
-      if (!row) {
-        const homeTeamId = Number(req.query.homeTeamId);
-        const awayTeamId = Number(req.query.awayTeamId);
-        const homeTeamName = String(req.query.homeTeamName || "Home");
-        const awayTeamName = String(req.query.awayTeamName || "Away");
+      // Resolve team IDs from query params or DB row
+      const homeTeamId = Number(req.query.homeTeamId) || dbRow?.home_team_id;
+      const awayTeamId = Number(req.query.awayTeamId) || dbRow?.away_team_id;
+      const homeTeamName = String(req.query.homeTeamName || dbRow?.home_team_name || "Home");
+      const awayTeamName = String(req.query.awayTeamName || dbRow?.away_team_name || "Away");
 
-        if (!homeTeamId || !awayTeamId) {
-          return res.status(404).json({ error: "Match not found in database. Provide homeTeamId and awayTeamId to predict for upcoming matches." });
-        }
+      let row: any = null;
 
+      // 2. Always build feature row from fresh simulation data when team IDs are available
+      if (homeTeamId && awayTeamId) {
         // Fetch team stats via the player-simulation endpoint
         const serverPort = process.env.PORT || 5000;
         const baseUrl = `http://localhost:${serverPort}`;
@@ -1964,23 +1963,25 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
         );
 
         if (!simRes.ok) {
-          const errText = await simRes.text();
-          return res.status(502).json({ error: `Failed to fetch team stats: ${errText}` });
-        }
+          // Sim data unavailable — will fall back to DB row below
+          console.warn(`[engine/predict] sim fetch failed (${simRes.status}) — falling back to DB row`);
+        } else {
 
         const sim: any = await simRes.json();
         const h = sim.home;
         const a = sim.away;
-        const hStats = h?.teamMatchStats?.all;
-        const hStats1h = h?.teamMatchStats?.firstHalf;
-        const aStats = a?.teamMatchStats?.all;
-        const aStats1h = a?.teamMatchStats?.firstHalf;
-        const hPhase = h?.phaseStrengths;
-        const aPhase = a?.phaseStrengths;
-        const hForm = h?.formSummary;
-        const aForm = a?.formSummary;
+        const hStats    = h?.teamMatchStats?.all;
+        const hStats1h  = h?.teamMatchStats?.firstHalf;
+        const hStats2h  = h?.teamMatchStats?.secondHalf;
+        const aStats    = a?.teamMatchStats?.all;
+        const aStats1h  = a?.teamMatchStats?.firstHalf;
+        const aStats2h  = a?.teamMatchStats?.secondHalf;
+        const hPhase    = h?.phaseStrengths;
+        const aPhase    = a?.phaseStrengths;
+        const hForm     = h?.formSummary;
+        const aForm     = a?.formSummary;
 
-        // Build a synthetic feature row matching the match_simulations schema
+        // Build a synthetic feature row matching ALL 92 engine features
         row = {
           event_id: eventId,
           home_team_id: homeTeamId,
@@ -1993,50 +1994,139 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           match_date: new Date().toISOString().slice(0, 10),
           tournament: String(req.query.tournamentName || ""),
 
-          home_phase_defensive: hPhase?.defensiveStrength ?? null,
-          home_phase_attack: hPhase?.attackStrength ?? null,
-          home_phase_midfield: hPhase?.midfieldStrength ?? null,
-          home_form_strength: h?.formStrength ?? null,
-          home_scoring_strength: h?.scoringStrength ?? null,
-          home_defending_strength: h?.defendingStrength ?? null,
+          // ── Home full-match averages ──────────────────────────────────────
+          home_avg_xg:                  hStats?.avgXg                  ?? null,
+          home_avg_goals_scored:        hStats?.avgGoalsScored          ?? null,
+          home_avg_goals_conceded:      hStats?.avgGoalsConceded        ?? null,
+          home_avg_big_chances:         hStats?.avgBigChances           ?? null,
+          home_avg_big_chances_scored:  hStats?.avgBigChancesScored     ?? null,
+          home_avg_big_chances_missed:  hStats?.avgBigChancesMissed     ?? null,
+          home_avg_total_shots:         hStats?.avgTotalShots           ?? null,
+          home_avg_shots_on_target:     hStats?.avgShotsOnTarget        ?? null,
+          home_avg_shots_off_target:    hStats?.avgShotsOffTarget       ?? null,
+          home_avg_blocked_shots:       hStats?.avgBlockedShots         ?? null,
+          home_avg_shots_inside_box:    hStats?.avgShotsInsideBox       ?? null,
+          home_avg_possession:          hStats?.avgPossession           ?? null,
+          home_avg_pass_accuracy:       hStats?.avgPassAccuracy         ?? null,
+          home_avg_total_passes:        hStats?.avgTotalPasses          ?? null,
+          home_avg_corner_kicks:        hStats?.avgCornerKicks          ?? null,
+          home_avg_fouls:               hStats?.avgFouls                ?? null,
+          home_avg_duels_won:           hStats?.avgDuelsWon             ?? null,
+          home_avg_tackles_won:         hStats?.avgTacklesWon           ?? null,
+          home_avg_interceptions:       hStats?.avgInterceptions        ?? null,
+          home_avg_clearances:          hStats?.avgClearances           ?? null,
+          home_avg_goalkeeper_saves:    hStats?.avgGoalkeeperSaves      ?? null,
+          home_avg_goals_prevented:     hStats?.avgGoalsPrevented       ?? null,
 
-          home_avg_goals_scored: hStats?.avgGoalsScored ?? null,
-          home_avg_goals_conceded: hStats?.avgGoalsConceded ?? null,
-          home_avg_xg: hStats?.avgXg ?? null,
-          home_avg_possession: hStats?.avgPossession ?? null,
-          home_avg_big_chances: hStats?.avgBigChances ?? null,
-          home_avg_shots_on_target: hStats?.avgShotsOnTarget ?? null,
-          home_avg_shots_inside_box: hStats?.avgShotsInsideBox ?? null,
-          home_avg_pass_accuracy: hStats?.avgPassAccuracy ?? null,
-          home_avg_goalkeeper_saves: hStats?.avgGoalkeeperSaves ?? null,
+          // ── Home role strengths ───────────────────────────────────────────
+          home_phase_attack:            hPhase?.attackStrength          ?? null,
+          home_phase_defensive:         hPhase?.defensiveStrength       ?? null,
+          home_phase_midfield:          hPhase?.midfieldStrength        ?? null,
+          home_phase_keeper:            hPhase?.keeperStrength          ?? null,
+          home_phase_fullback:          hPhase?.fullbackStrength        ?? null,
 
-          home_h1_avg_goals_scored: hStats1h?.avgGoalsScored ?? null,
-          home_h1_avg_xg: hStats1h?.avgXg ?? null,
-          home_h1_avg_big_chances: hStats1h?.avgBigChances ?? null,
-          home_h1_avg_total_shots: hStats1h?.avgTotalShots ?? null,
+          // ── Home form (last 7) ────────────────────────────────────────────
+          home_form_strength:           h?.formStrength                 ?? null,
+          home_scoring_strength:        h?.scoringStrength              ?? null,
+          home_defending_strength:      h?.defendingStrength            ?? null,
+          home_form_points:             hForm?.formPoints               ?? h?.formPoints ?? null,
+          home_clean_sheets:            hForm?.cleanSheets              ?? null,
 
-          away_phase_defensive: aPhase?.defensiveStrength ?? null,
-          away_phase_attack: aPhase?.attackStrength ?? null,
-          away_phase_midfield: aPhase?.midfieldStrength ?? null,
-          away_form_strength: a?.formStrength ?? null,
-          away_scoring_strength: a?.scoringStrength ?? null,
-          away_defending_strength: a?.defendingStrength ?? null,
+          // ── Home 1st-half averages ────────────────────────────────────────
+          home_h1_avg_xg:               hStats1h?.avgXg                 ?? null,
+          home_h1_avg_goals_scored:     hStats1h?.avgGoalsScored        ?? null,
+          home_h1_avg_goals_conceded:   hStats1h?.avgGoalsConceded      ?? null,
+          home_h1_avg_big_chances:      hStats1h?.avgBigChances         ?? null,
+          home_h1_avg_total_shots:      hStats1h?.avgTotalShots         ?? null,
+          home_h1_avg_possession:       hStats1h?.avgPossession         ?? null,
+          home_h1_avg_pass_accuracy:    hStats1h?.avgPassAccuracy       ?? null,
 
-          away_avg_goals_scored: aStats?.avgGoalsScored ?? null,
-          away_avg_goals_conceded: aStats?.avgGoalsConceded ?? null,
-          away_avg_xg: aStats?.avgXg ?? null,
-          away_avg_possession: aStats?.avgPossession ?? null,
-          away_avg_big_chances: aStats?.avgBigChances ?? null,
-          away_avg_shots_on_target: aStats?.avgShotsOnTarget ?? null,
-          away_avg_shots_inside_box: aStats?.avgShotsInsideBox ?? null,
-          away_avg_pass_accuracy: aStats?.avgPassAccuracy ?? null,
-          away_avg_goalkeeper_saves: aStats?.avgGoalkeeperSaves ?? null,
+          // ── Home 2nd-half averages ────────────────────────────────────────
+          home_h2_avg_xg:               hStats2h?.avgXg                 ?? null,
+          home_h2_avg_goals_scored:     hStats2h?.avgGoalsScored        ?? null,
+          home_h2_avg_goals_conceded:   hStats2h?.avgGoalsConceded      ?? null,
+          home_h2_avg_big_chances:      hStats2h?.avgBigChances         ?? null,
+          home_h2_avg_total_shots:      hStats2h?.avgTotalShots         ?? null,
+          home_h2_avg_possession:       hStats2h?.avgPossession         ?? null,
+          home_h2_avg_pass_accuracy:    hStats2h?.avgPassAccuracy       ?? null,
 
-          away_h1_avg_goals_scored: aStats1h?.avgGoalsScored ?? null,
-          away_h1_avg_xg: aStats1h?.avgXg ?? null,
-          away_h1_avg_big_chances: aStats1h?.avgBigChances ?? null,
-          away_h1_avg_total_shots: aStats1h?.avgTotalShots ?? null,
+          // ── Away full-match averages ──────────────────────────────────────
+          away_avg_xg:                  aStats?.avgXg                   ?? null,
+          away_avg_goals_scored:        aStats?.avgGoalsScored          ?? null,
+          away_avg_goals_conceded:      aStats?.avgGoalsConceded        ?? null,
+          away_avg_big_chances:         aStats?.avgBigChances           ?? null,
+          away_avg_big_chances_scored:  aStats?.avgBigChancesScored     ?? null,
+          away_avg_big_chances_missed:  aStats?.avgBigChancesMissed     ?? null,
+          away_avg_total_shots:         aStats?.avgTotalShots           ?? null,
+          away_avg_shots_on_target:     aStats?.avgShotsOnTarget        ?? null,
+          away_avg_shots_off_target:    aStats?.avgShotsOffTarget       ?? null,
+          away_avg_blocked_shots:       aStats?.avgBlockedShots         ?? null,
+          away_avg_shots_inside_box:    aStats?.avgShotsInsideBox       ?? null,
+          away_avg_possession:          aStats?.avgPossession           ?? null,
+          away_avg_pass_accuracy:       aStats?.avgPassAccuracy         ?? null,
+          away_avg_total_passes:        aStats?.avgTotalPasses          ?? null,
+          away_avg_corner_kicks:        aStats?.avgCornerKicks          ?? null,
+          away_avg_fouls:               aStats?.avgFouls                ?? null,
+          away_avg_duels_won:           aStats?.avgDuelsWon             ?? null,
+          away_avg_tackles_won:         aStats?.avgTacklesWon           ?? null,
+          away_avg_interceptions:       aStats?.avgInterceptions        ?? null,
+          away_avg_clearances:          aStats?.avgClearances           ?? null,
+          away_avg_goalkeeper_saves:    aStats?.avgGoalkeeperSaves      ?? null,
+          away_avg_goals_prevented:     aStats?.avgGoalsPrevented       ?? null,
+
+          // ── Away role strengths ───────────────────────────────────────────
+          away_phase_attack:            aPhase?.attackStrength          ?? null,
+          away_phase_defensive:         aPhase?.defensiveStrength       ?? null,
+          away_phase_midfield:          aPhase?.midfieldStrength        ?? null,
+          away_phase_keeper:            aPhase?.keeperStrength          ?? null,
+          away_phase_fullback:          aPhase?.fullbackStrength        ?? null,
+
+          // ── Away form (last 7) ────────────────────────────────────────────
+          away_form_strength:           a?.formStrength                 ?? null,
+          away_scoring_strength:        a?.scoringStrength              ?? null,
+          away_defending_strength:      a?.defendingStrength            ?? null,
+          away_form_points:             aForm?.formPoints               ?? a?.formPoints ?? null,
+          away_clean_sheets:            aForm?.cleanSheets              ?? null,
+
+          // ── Away 1st-half averages ────────────────────────────────────────
+          away_h1_avg_xg:               aStats1h?.avgXg                 ?? null,
+          away_h1_avg_goals_scored:     aStats1h?.avgGoalsScored        ?? null,
+          away_h1_avg_goals_conceded:   aStats1h?.avgGoalsConceded      ?? null,
+          away_h1_avg_big_chances:      aStats1h?.avgBigChances         ?? null,
+          away_h1_avg_total_shots:      aStats1h?.avgTotalShots         ?? null,
+          away_h1_avg_possession:       aStats1h?.avgPossession         ?? null,
+          away_h1_avg_pass_accuracy:    aStats1h?.avgPassAccuracy       ?? null,
+
+          // ── Away 2nd-half averages ────────────────────────────────────────
+          away_h2_avg_xg:               aStats2h?.avgXg                 ?? null,
+          away_h2_avg_goals_scored:     aStats2h?.avgGoalsScored        ?? null,
+          away_h2_avg_goals_conceded:   aStats2h?.avgGoalsConceded      ?? null,
+          away_h2_avg_big_chances:      aStats2h?.avgBigChances         ?? null,
+          away_h2_avg_total_shots:      aStats2h?.avgTotalShots         ?? null,
+          away_h2_avg_possession:       aStats2h?.avgPossession         ?? null,
+          away_h2_avg_pass_accuracy:    aStats2h?.avgPassAccuracy       ?? null,
         };
+
+        // Merge real scores / result from DB row if this match has been played
+        if (dbRow) {
+          row.home_goals    = dbRow.home_goals    ?? null;
+          row.away_goals    = dbRow.away_goals    ?? null;
+          row.home_ht_goals = dbRow.home_ht_goals ?? null;
+          row.away_ht_goals = dbRow.away_ht_goals ?? null;
+          row.result        = dbRow.result        ?? null;
+          row.tournament    = dbRow.tournament    || row.tournament;
+          row.match_date    = dbRow.match_date    || row.match_date;
+        }
+        } // close else (sim ok)
+      } // close if (homeTeamId && awayTeamId)
+
+      // 3. Fall back to DB row if fresh sim was unavailable
+      if (!row && dbRow) row = dbRow;
+
+      if (!row) {
+        return res.status(404).json({
+          error: "Match not found. Provide homeTeamId and awayTeamId to predict for upcoming matches.",
+        });
       }
 
       const prediction = await engine.predictFromRow(row);
