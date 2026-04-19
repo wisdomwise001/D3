@@ -769,11 +769,25 @@ class XGEngine {
         db.prepare("DELETE FROM engine_models WHERE model_name = 'full_engine'").run();
         return false;
       }
-      this.persisted = parsed;
+      // Validate feature count — if the saved scaler/weights were trained with a different
+      // number of features than the current FEATURE_NAMES list, we must discard the model.
+      const savedFeatureCount = parsed.scaler?.min?.length ?? 0;
+      if (savedFeatureCount > 0 && savedFeatureCount !== N_FEATURES) {
+        console.warn(`Engine: feature count mismatch (saved=${savedFeatureCount}, current=${N_FEATURES}) — clearing. Please retrain.`);
+        db.prepare("DELETE FROM engine_models WHERE model_name = 'full_engine'").run();
+        return false;
+      }
+      // Only assign persisted AFTER all validation passes, so a later _hydrate()
+      // failure does not leave stale data in memory.
+      const toHydrate = parsed;
+      this.persisted = toHydrate;
       await this._hydrate();
       return true;
     } catch (e) {
       console.warn("Engine load failed (format mismatch?) — clearing saved model:", (e as Error).message);
+      // Clear both DB and in-memory state so predict() cannot retry stale weights.
+      this.persisted = null;
+      this.annModel = null;
       try { db.prepare("DELETE FROM engine_models WHERE model_name = 'full_engine'").run(); } catch {}
       return false;
     }
