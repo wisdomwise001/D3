@@ -2139,9 +2139,17 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
       const eventsData = await fetchSofaScore(`/sport/${sport}/scheduled-events/${sofaDate}`);
       const allEvents: any[] = eventsData?.events || [];
 
+      // SofaScore returns events across multiple dates (adjacent days due to timezones).
+      // Only process events that actually fall on the selected date based on their startTimestamp.
       const finishedEvents = allEvents.filter((e: any) => {
         const type = e.status?.type;
-        return type === "finished";
+        if (type !== "finished") return false;
+        // Verify the event's actual date matches the selected date
+        if (e.startTimestamp) {
+          const eventDate = new Date(e.startTimestamp * 1000).toISOString().slice(0, 10);
+          if (eventDate !== date) return false;
+        }
+        return true;
       });
 
       if (finishedEvents.length === 0) {
