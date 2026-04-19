@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Platform,
   RefreshControl,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -115,6 +116,44 @@ export default function EngineScreen() {
     trainMutation.mutate();
   }, [trainMutation]);
 
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/engine/models"), { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Delete failed");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
+      refetchStatus();
+      Alert.alert(
+        "Models Cleared",
+        "All saved engine models have been deleted. The engine is ready for fresh training.",
+        [{ text: "OK", style: "default" }]
+      );
+    },
+    onError: (err: Error) => {
+      Alert.alert("Error", err.message, [{ text: "OK" }]);
+    },
+  });
+
+  const handleDeleteModels = useCallback(() => {
+    Alert.alert(
+      "Delete All Saved Models",
+      "This will permanently remove all trained model weights. The engine will need to be fully retrained before it can make predictions.\n\nAre you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete All Models",
+          style: "destructive",
+          onPress: () => deleteMutation.mutate(),
+        },
+      ]
+    );
+  }, [deleteMutation]);
+
   const isTraining = polling && progress?.running;
   const trainingProgress = progress?.progress ?? 0;
   const trainingMessage = progress?.message ?? "";
@@ -209,8 +248,25 @@ export default function EngineScreen() {
       </TouchableOpacity>
 
       <Text style={styles.trainHint}>
-        Trains on all {status?.trainingSamples ?? "stored"} historical matches in your database. All 7 models + meta-learner are trained end-to-end.
+        Trains on all {status?.trainingSamples ?? "stored"} historical matches in your database. All 9 models are trained end-to-end using real ML libraries.
       </Text>
+
+      {status?.trained && (
+        <TouchableOpacity
+          style={[styles.deleteButton, deleteMutation.isPending && styles.trainButtonDisabled]}
+          onPress={handleDeleteModels}
+          disabled={deleteMutation.isPending || isTraining}
+        >
+          {deleteMutation.isPending ? (
+            <ActivityIndicator size="small" color="#f87171" />
+          ) : (
+            <Ionicons name="trash-outline" size={16} color="#f87171" />
+          )}
+          <Text style={styles.deleteButtonText}>
+            {deleteMutation.isPending ? "Clearing..." : "Delete All Saved Models"}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       <View style={styles.architectureSection}>
         <Text style={styles.sectionTitle}>Engine Architecture</Text>
@@ -298,7 +354,14 @@ const styles = StyleSheet.create({
   },
   trainButtonDisabled: { opacity: 0.6 },
   trainButtonText: { fontSize: 15, fontFamily: "Inter_600SemiBold", color: "#fff" },
-  trainHint: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, textAlign: "center", marginBottom: 24 },
+  trainHint: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, textAlign: "center", marginBottom: 12 },
+  deleteButton: {
+    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 20,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginBottom: 24, borderWidth: 1, borderColor: "#f8717144",
+    backgroundColor: "#7f1d1d22",
+  },
+  deleteButtonText: { fontSize: 13, fontFamily: "Inter_500Medium", color: "#f87171" },
   architectureSection: { marginBottom: 24 },
   sectionTitle: { fontSize: 16, fontFamily: "Inter_700Bold", color: Colors.dark.text, marginBottom: 4 },
   sectionSubtitle: { fontSize: 12, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginBottom: 12 },

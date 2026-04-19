@@ -537,19 +537,19 @@ const CAUSAL_KEY_FEATURES = [
   "home_avg_big_chances", "away_avg_big_chances",
 ];
 
-function fitCausal(normFeatures: number[][], targets: number[][], rawFeatureMeans: number[]): {
+function fitCausal(normFeatures: number[][], targets: number[][]): {
   model: MultivariateLinearRegression;
   state: CausalState;
   featureMeans: number[];
 } {
-  // MultivariateLinearRegression from ml-regression handles multi-output OLS natively
+  // MultivariateLinearRegression from ml-regression: handles multi-output OLS natively
   const mlr = new MultivariateLinearRegression(normFeatures, targets, { intercept: true });
-  const scaler = fitScaler(normFeatures);
-  const normMeans = applyScaler(rawFeatureMeans, scaler);
+  // Baseline = mean of each normalised feature across training set (correct baseline in [0,1] space)
+  const featureMeans = FEATURE_NAMES.map((_, i) => arrMean(normFeatures.map(f => f[i])));
   return {
     model: mlr,
-    state: { modelJson: JSON.stringify(mlr.toJSON()), featureMeans: normMeans },
-    featureMeans: normMeans,
+    state: { modelJson: JSON.stringify(mlr.toJSON()), featureMeans },
+    featureMeans,
   };
 }
 
@@ -811,7 +811,7 @@ class XGEngine {
 
     // ── 8. Causal ─────────────────────────────────────────────────────────────
     prog(78, "Fitting Causal Model (ml-regression OLS)...");
-    const { model: causalModel, state: causalState, featureMeans } = fitCausal(normFeatures, allTargets, rawFeatureMeans);
+    const { model: causalModel, state: causalState, featureMeans } = fitCausal(normFeatures, allTargets);
     this.causalLive = { model: causalModel, featureMeans };
 
     // ── 9. Meta-Learner ───────────────────────────────────────────────────────
@@ -821,9 +821,10 @@ class XGEngine {
 
     // ── Evaluation ────────────────────────────────────────────────────────────
     prog(92, "Evaluating model on training set...");
+    const auxModels = { hmm: hmmModel, gp: gpModel, garch: garchModel, svm: svmModel };
     let sumMSE = 0, sumMAE = 0, sumH1MSE = 0;
     for (let i = 0; i < rows.length; i++) {
-      const p = this._predictLive(normFeatures[i], rawFeatures[i], rawFeatureMeans, scaler);
+      const p = this._predictLive(normFeatures[i], rawFeatures[i], rawFeatureMeans, scaler, auxModels);
       const y = allTargets[i];
       sumMSE += ((p.homeFullTimeXg - y[0]) ** 2 + (p.awayFullTimeXg - y[1]) ** 2) / 2;
       sumMAE += (Math.abs(p.homeFullTimeXg - y[0]) + Math.abs(p.awayFullTimeXg - y[1])) / 2;
@@ -852,11 +853,16 @@ class XGEngine {
   }
 
   private _predictLive(
-    normX: number[], rawX: number[], rawFeatureMeans: number[], scaler: Scaler
+    normX: number[], rawX: number[], rawFeatureMeans: number[], scaler: Scaler,
+    aux?: { hmm: HMMModel; gp: GPModel; garch: GARCHModel; svm: SVMModel }
   ): XGPrediction {
     if (!this.annModel || !this.rfModels || !this.gbmLive || !this.causalLive || !this.metaModel) {
       throw new Error("Engine not trained.");
     }
+
+    // Use passed-in aux models (during training eval) or fall back to persisted
+    const models = aux ?? this.persisted;
+    if (!models) throw new Error("Engine not trained. Train from the Engine tab first.");
 
     // Base model predictions
     const annPred = annPredict(this.annModel, normX);
@@ -867,16 +873,19 @@ class XGEngine {
     const metaPred = metaPredict(annPred, rfPred, gbmPred, this.metaModel);
 
     // Auxiliary models
-    const hmmResult = hmmPredict(normX, this.persisted!.hmm);
-    const gpResult = gpPredict(normX, this.persisted!.gp);
+    const hmmResult = hmmPredict(normX, models.hmm);
+    const gpResult = gpPredict(normX, models.gp);
     const rawXg = (rawX[0] + rawX[1]) / 2;
-    const garchResult = garchVolatility(rawXg, this.persisted!.garch);
-    const svmResult = svmCorrect(normX, this.persisted!.svm);
+    const garchResult = garchVolatility(rawXg, models.garch);
+    const svmResult = svmCorrect(normX, models.svm);
     const causalResult = causalAnalysis(normX, this.causalLive);
 
-    // Final combination: meta + hmm factor + svm correction + causal delta
+    // Final combination:
+    //  meta × HMM factor (state-adjusted) + SVM correction + clamped causal delta
+    //  Causal delta is clamped to ±0.3 goals and added after HMM scaling
+    //  to prevent OLS extrapolation from inflating the final xG.
     const combine = (meta: number, causalD: number) =>
-      Math.max(0, (meta + causalD * 0.3) * hmmResult.factor + svmResult.correction);
+      Math.max(0, meta * hmmResult.factor + svmResult.correction + clamp(causalD * 0.08, -0.3, 0.3));
 
     const hFt = combine(metaPred[0], causalResult.delta[0]);
     const aFt = combine(metaPred[1], causalResult.delta[1]);

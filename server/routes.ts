@@ -1926,6 +1926,16 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
     res.json(engineTrainingJob);
   });
 
+  // ─── xG Engine: delete all saved models (fresh start) ────────────────────
+  app.delete("/api/engine/models", (_req: Request, res: Response) => {
+    try {
+      db.prepare("DELETE FROM engine_models").run();
+      res.json({ success: true, message: "All saved engine models cleared. Ready to retrain." });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // ─── xG Engine: predict for stored match ──────────────────────────────────
   app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {
     try {
