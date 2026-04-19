@@ -83,8 +83,10 @@ export const FEATURE_NAMES = [
   "home_h2_avg_pass_accuracy", "away_h2_avg_pass_accuracy",
   // ── Injury / suspension impact (key player absences) ───────────────────────
   "home_injury_impact", "away_injury_impact",
+  // ── League / country context (label-encoded; 0 = unknown) ─────────────────
+  "league_encoded", "country_encoded",
 ];
-export const N_FEATURES = FEATURE_NAMES.length; // 94
+export const N_FEATURES = FEATURE_NAMES.length; // 96
 
 export const TARGET_NAMES = [
   "home_ft_xg", "away_ft_xg",
@@ -689,6 +691,8 @@ interface PersistedState {
   gbm: GBMState;
   causal: CausalState;
   meta: MetaState;
+  leagueEncoding: Record<string, number>;   // league name → integer label (0 = unknown)
+  countryEncoding: Record<string, number>;  // country name → integer label (0 = unknown)
 }
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -848,8 +852,27 @@ class XGEngine {
     const prog = (pct: number, msg: string) => onProgress?.(pct, msg);
 
     prog(2, "Extracting features from database...");
-    const rawFeatures = rows.map(r => extractFeatures(r));
-    const allTargets = rows.map(r => extractTargets(r));
+
+    // ── Build league / country label encodings from training data ──────────────
+    // Sorted alphabetically so the integer labels are deterministic.
+    // 0 is reserved for "unknown" (leagues/countries not seen during training).
+    const uniqueLeagues = [...new Set(rows.map((r: any) => (r.tournament as string) || ""))].sort();
+    const uniqueCountries = [...new Set(rows.map((r: any) => (r.country as string) || ""))].sort();
+    const leagueEncoding: Record<string, number> = {};
+    uniqueLeagues.forEach((l, i) => { leagueEncoding[l] = i + 1; });
+    const countryEncoding: Record<string, number> = {};
+    uniqueCountries.forEach((c, i) => { countryEncoding[c] = i + 1; });
+    console.log(`[Engine] Encoding ${uniqueLeagues.length} leagues, ${uniqueCountries.length} countries.`);
+
+    // Augment each training row with encoded league/country integers.
+    const augmentedRows = rows.map((r: any) => ({
+      ...r,
+      league_encoded:  leagueEncoding[r.tournament ?? ""]  ?? 0,
+      country_encoded: countryEncoding[r.country ?? ""]    ?? 0,
+    }));
+
+    const rawFeatures = augmentedRows.map((r: any) => extractFeatures(r));
+    const allTargets = rows.map((r: any) => extractTargets(r));
 
     prog(5, "Fitting min-max scaler...");
     const scaler = fitScaler(rawFeatures);
@@ -940,6 +963,7 @@ class XGEngine {
       scaler, rawFeatureMeans, ann: annState, hmm: hmmModel,
       gp: gpModel, garch: garchModel, svm: svmModel,
       rf: rfState, gbm: gbmState, causal: causalState, meta: metaState,
+      leagueEncoding, countryEncoding,
     };
     this._save(persisted, n, metrics);
 
@@ -1051,7 +1075,16 @@ class XGEngine {
   }
 
   async predictFromRow(row: Record<string, any>): Promise<XGPrediction> {
-    return this.predict(extractFeatures(row));
+    if (!this.annModel) await this._hydrate();
+    if (!this.persisted) throw new Error("Engine not trained. Train from the Engine tab first.");
+    // Augment with label-encoded league/country using the training-time encoding map.
+    // Unknown leagues/countries default to 0 so the engine gracefully handles new competitions.
+    const augmented = {
+      ...row,
+      league_encoded:  this.persisted.leagueEncoding?.[row.tournament  ?? ""] ?? 0,
+      country_encoded: this.persisted.countryEncoding?.[row.country ?? ""] ?? 0,
+    };
+    return this.predict(extractFeatures(augmented));
   }
 }
 

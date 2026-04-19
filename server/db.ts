@@ -245,6 +245,8 @@ col("away_h2_avg_big_chances", "REAL");
 col("away_h2_avg_total_shots", "REAL");
 col("away_h2_avg_pass_accuracy", "REAL");
 col("away_h2_avg_total_passes", "REAL");
+// League / country context
+col("country", "TEXT");
 // Injury / suspension columns
 col("home_injured_players", "TEXT");
 col("away_injured_players", "TEXT");

@@ -2045,7 +2045,8 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           away_goals: null,
           result: null,
           match_date: new Date().toISOString().slice(0, 10),
-          tournament: String(req.query.tournamentName || ""),
+          tournament: String(req.query.tournamentName || dbRow?.tournament || ""),
+          country:    String(req.query.country    || dbRow?.country    || ""),
 
           // ── Home full-match averages ──────────────────────────────────────
           home_avg_xg:                  hStats?.avgXg                  ?? null,
@@ -2328,7 +2329,8 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           const awayTeamId = event.awayTeam?.id;
           const homeTeamName = event.homeTeam?.name || event.homeTeam?.shortName || "Unknown";
           const awayTeamName = event.awayTeam?.name || event.awayTeam?.shortName || "Unknown";
-          const tournament = event.tournament?.name || event.tournament?.uniqueTournament?.name || "";
+          const tournament = event.tournament?.uniqueTournament?.name || event.tournament?.name || "";
+          const country = event.tournament?.category?.name || event.tournament?.uniqueTournament?.category?.name || "";
           const startTimestamp = event.startTimestamp;
           const matchDate = date;
 
@@ -2425,7 +2427,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             db.prepare(`
               INSERT OR REPLACE INTO match_simulations (
                 event_id, home_team_id, home_team_name, away_team_id, away_team_name,
-                tournament, sport, match_date, start_timestamp,
+                tournament, country, sport, match_date, start_timestamp,
                 home_goals, away_goals, result,
                 home_phase_defensive, home_phase_attack, home_phase_midfield, home_phase_keeper, home_phase_fullback,
                 home_form_strength, home_scoring_strength, home_defending_strength,
@@ -2455,7 +2457,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 home_suspended_players, away_suspended_players,
                 home_injury_impact, away_injury_impact
               ) VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
@@ -2469,7 +2471,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
               )
             `).run(
               eventId, homeTeamId, homeTeamName, awayTeamId, awayTeamName,
-              tournament, sport, matchDate, startTimestamp,
+              tournament, country, sport, matchDate, startTimestamp,
               hGoals, aGoals, result,
               hPhase?.defensiveStrength ?? null, hPhase?.attackStrength ?? null, hPhase?.midfieldStrength ?? null, hPhase?.keeperStrength ?? null, hPhase?.fullbackStrength ?? null,
               h?.formStrength ?? null, h?.scoringStrength ?? null, h?.defendingStrength ?? null,

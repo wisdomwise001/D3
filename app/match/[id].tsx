@@ -105,6 +105,7 @@ export default function MatchDetailScreen() {
   const statusDescription = event?.status?.description || params.statusDescription || "";
   const startTimestamp = event?.startTimestamp || Number(params.startTimestamp) || 0;
   const tournamentName = event?.tournament?.uniqueTournament?.name || event?.tournament?.name || params.tournamentName || "";
+  const countryName = event?.tournament?.uniqueTournament?.category?.name || "";
   const seasonId = event?.season?.id?.toString() || params.seasonId || "";
   const uniqueTournamentId = event?.tournament?.uniqueTournament?.id?.toString() || params.uniqueTournamentId || "";
 
@@ -261,6 +262,7 @@ export default function MatchDetailScreen() {
             homeTeamId={homeTeamId || undefined}
             awayTeamId={awayTeamId || undefined}
             tournamentName={tournamentName || undefined}
+            countryName={countryName || undefined}
           />
         )}
       </View>

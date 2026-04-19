@@ -160,6 +160,7 @@ export default function XGEngineTab({
   homeTeamId,
   awayTeamId,
   tournamentName,
+  countryName,
 }: {
   eventId: string;
   homeTeamName: string;
@@ -167,6 +168,7 @@ export default function XGEngineTab({
   homeTeamId?: number;
   awayTeamId?: number;
   tournamentName?: string;
+  countryName?: string;
 }) {
   const queryParts: string[] = [];
   if (homeTeamId) queryParts.push(`homeTeamId=${homeTeamId}`);
@@ -174,6 +176,7 @@ export default function XGEngineTab({
   if (homeTeamName) queryParts.push(`homeTeamName=${encodeURIComponent(homeTeamName)}`);
   if (awayTeamName) queryParts.push(`awayTeamName=${encodeURIComponent(awayTeamName)}`);
   if (tournamentName) queryParts.push(`tournamentName=${encodeURIComponent(tournamentName)}`);
+  if (countryName) queryParts.push(`country=${encodeURIComponent(countryName)}`);
   const queryUrl = `/api/engine/predict/${eventId}${queryParts.length ? `?${queryParts.join("&")}` : ""}`;
 
   const { data, isLoading, error, refetch } = useQuery<PredictionResponse>({
