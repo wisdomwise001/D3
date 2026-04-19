@@ -10,86 +10,154 @@ import {
   Alert,
   Platform,
   RefreshControl,
+  ScrollView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getApiUrl } from "@/lib/query-client";
 
-function getApiBase() {
-  return `${getApiUrl()}`;
+function base() { return `${getApiUrl()}`; }
+
+type M = Record<string, any>;
+
+// ─── Tiny helpers ──────────────────────────────────────────────────────────
+
+function fmt(v: number | null | undefined, dec = 1): string {
+  if (v == null) return "—";
+  return Number.isFinite(v) ? v.toFixed(dec) : "—";
 }
-
-type MatchRecord = {
-  id: number;
-  event_id: number;
-  home_team_name: string;
-  away_team_name: string;
-  home_goals: number | null;
-  away_goals: number | null;
-  result: string | null;
-  tournament: string | null;
-  match_date: string | null;
-  sport: string;
-  home_form_strength: number | null;
-  away_form_strength: number | null;
-  home_scoring_strength: number | null;
-  away_scoring_strength: number | null;
-  home_defending_strength: number | null;
-  away_defending_strength: number | null;
-  home_avg_goals_scored: number | null;
-  away_avg_goals_scored: number | null;
-  home_avg_xg: number | null;
-  away_avg_xg: number | null;
-  home_avg_possession: number | null;
-  away_avg_possession: number | null;
-  home_avg_shots_on_target: number | null;
-  away_avg_shots_on_target: number | null;
-  home_matches_analyzed: number | null;
-  away_matches_analyzed: number | null;
-  processed_at: string;
-};
-
-function StatBadge({ label, home, away }: { label: string; home: number | null; away: number | null }) {
-  if (home == null && away == null) return null;
-  return (
-    <View style={styles.statRow}>
-      <Text style={styles.statLabel}>{label}</Text>
-      <Text style={styles.statValue}>
-        <Text style={styles.homeVal}>{home != null ? home.toFixed(1) : "—"}</Text>
-        <Text style={styles.statSep}> · </Text>
-        <Text style={styles.awayVal}>{away != null ? away.toFixed(1) : "—"}</Text>
-      </Text>
-    </View>
-  );
+function fmtPct(v: number | null | undefined): string {
+  if (v == null) return "—";
+  return Number.isFinite(v) ? `${v.toFixed(1)}%` : "—";
 }
 
 function ResultDot({ result }: { result: string | null }) {
   if (!result) return null;
   const color = result === "H" ? "#4ade80" : result === "D" ? "#facc15" : "#f87171";
-  const label = result === "H" ? "H" : result === "D" ? "D" : "A";
   return (
     <View style={[styles.resultDot, { backgroundColor: color }]}>
-      <Text style={styles.resultDotText}>{label}</Text>
+      <Text style={styles.resultDotText}>{result}</Text>
     </View>
   );
 }
 
-function MatchCard({ item, onDelete }: { item: MatchRecord; onDelete: (id: number) => void }) {
+function FormChar({ ch }: { ch: string }) {
+  const color = ch === "W" ? "#4ade80" : ch === "D" ? "#facc15" : "#f87171";
+  return <Text style={[styles.formChar, { color }]}>{ch}</Text>;
+}
+
+function FormString({ value }: { value: string | null | undefined }) {
+  if (!value) return <Text style={styles.formDash}>—</Text>;
+  const chars = value.split(" ").filter(Boolean);
+  return (
+    <View style={styles.formRow}>
+      {chars.map((c, i) => <FormChar key={i} ch={c} />)}
+    </View>
+  );
+}
+
+// ─── Section Headers ────────────────────────────────────────────────────────
+
+function SectionHeader({ label }: { label: string }) {
+  return (
+    <View style={styles.sectionHeader}>
+      <Text style={styles.sectionHeaderText}>{label}</Text>
+    </View>
+  );
+}
+
+// ─── Two-column comparison row (Home | Label | Away) ───────────────────────
+
+function CmpRow({ label, home, away, note, highlight }: {
+  label: string; home: string; away: string; note?: string; highlight?: boolean;
+}) {
+  return (
+    <View style={[styles.cmpRow, highlight && styles.cmpRowHighlight]}>
+      <Text style={[styles.cmpVal, styles.homeCol]} numberOfLines={1}>{home}</Text>
+      <View style={styles.cmpLabelCol}>
+        <Text style={styles.cmpLabel} numberOfLines={1}>{label}</Text>
+        {note ? <Text style={styles.cmpNote} numberOfLines={1}>{note}</Text> : null}
+      </View>
+      <Text style={[styles.cmpVal, styles.awayCol]} numberOfLines={1}>{away}</Text>
+    </View>
+  );
+}
+
+// ─── Strength bar row (for role / form strengths) ──────────────────────────
+
+function StrengthRow({ label, note, home, away }: {
+  label: string; note: string; home: number | null; away: number | null;
+}) {
+  return (
+    <View style={styles.strengthRow}>
+      <View style={styles.strengthBarSide}>
+        <View style={styles.strengthBarBg}>
+          <View style={[styles.strengthBarFill, styles.strengthBarHome,
+            { width: `${Math.round(((home ?? 0) / 10) * 100)}%` as any }]} />
+        </View>
+        <Text style={[styles.strengthNum, styles.homeNum]}>{fmt(home)}</Text>
+      </View>
+      <View style={styles.strengthLabelCol}>
+        <Text style={styles.strengthLabel}>{label}</Text>
+        <Text style={styles.strengthNote}>{note}</Text>
+      </View>
+      <View style={styles.strengthBarSide}>
+        <Text style={[styles.strengthNum, styles.awayNum]}>{fmt(away)}</Text>
+        <View style={styles.strengthBarBg}>
+          <View style={[styles.strengthBarFill, styles.strengthBarAway,
+            { width: `${Math.round(((away ?? 0) / 10) * 100)}%` as any }]} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ─── Form summary line ──────────────────────────────────────────────────────
+
+function FormSummaryLine({ teamName, m }: { teamName: string; m: M }) {
+  const pts = m.form_points;
+  const gf = m.goals_for;
+  const ga = m.goals_against;
+  const cs = m.clean_sheets;
+  const form = m.recent_form;
+  const chars = (form || "").split(" ").filter(Boolean);
+  return (
+    <View style={styles.formSummaryLine}>
+      <Text style={styles.formSummaryTeam} numberOfLines={1}>{teamName}</Text>
+      <Text style={styles.formSummaryStats}>
+        {pts != null ? `${pts} pts` : "—"}{" · "}
+        {gf != null && ga != null ? `${gf}-${ga}` : "—"}{" · "}
+        {cs != null ? `CS ${cs}` : "—"}
+      </Text>
+      <View style={styles.formInline}>
+        {chars.map((c: string, i: number) => <FormChar key={i} ch={c} />)}
+      </View>
+    </View>
+  );
+}
+
+// ─── Main match card ────────────────────────────────────────────────────────
+
+function MatchCard({ item, onDelete }: { item: M; onDelete: (id: number) => void }) {
   const [expanded, setExpanded] = useState(false);
 
   function confirmDelete() {
     if (Platform.OS === "web") {
-      if (window.confirm(`Delete ${item.home_team_name} vs ${item.away_team_name}?`)) {
-        onDelete(item.event_id);
-      }
+      if (window.confirm(`Delete ${item.home_team_name} vs ${item.away_team_name}?`)) onDelete(item.event_id);
     } else {
-      Alert.alert("Delete Record", `Remove ${item.home_team_name} vs ${item.away_team_name}?`, [
+      Alert.alert("Delete", `Remove ${item.home_team_name} vs ${item.away_team_name}?`, [
         { text: "Cancel", style: "cancel" },
         { text: "Delete", style: "destructive", onPress: () => onDelete(item.event_id) },
       ]);
     }
   }
+
+  const h = (col: string) => item[`home_${col}`];
+  const a = (col: string) => item[`away_${col}`];
+
+  const analyzed = item.home_matches_analyzed ?? item.away_matches_analyzed ?? 0;
+  const statsCount = item.home_avg_goals_scored != null ? analyzed : 0;
 
   return (
     <View style={styles.card}>
@@ -98,66 +166,137 @@ function MatchCard({ item, onDelete }: { item: MatchRecord; onDelete: (id: numbe
           <ResultDot result={item.result} />
           <View style={styles.teamsRow}>
             <Text style={styles.teamName} numberOfLines={1}>{item.home_team_name}</Text>
-            <Text style={styles.score}>
-              {item.home_goals ?? "?"} – {item.away_goals ?? "?"}
-            </Text>
-            <Text style={styles.teamName} numberOfLines={1}>{item.away_team_name}</Text>
+            <Text style={styles.score}>{item.home_goals ?? "?"} – {item.away_goals ?? "?"}</Text>
+            <Text style={[styles.teamName, { textAlign: "right" }]} numberOfLines={1}>{item.away_team_name}</Text>
           </View>
           <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={16} color="#6b7280" />
         </View>
         <View style={styles.cardMeta}>
-          <Text style={styles.metaText}>{item.tournament || "—"}</Text>
+          <Text style={styles.metaText} numberOfLines={1}>{item.tournament || "—"}</Text>
           <Text style={styles.metaText}>{item.match_date || "—"}</Text>
         </View>
       </TouchableOpacity>
 
       {expanded && (
-        <View style={styles.expandedSection}>
-          <View style={styles.statsHeader}>
-            <Text style={styles.statsHeaderText}>Stat</Text>
-            <Text style={styles.statsHeaderText}>Home · Away</Text>
+        <ScrollView style={styles.expandedScroll} nestedScrollEnabled>
+          {/* Column headers */}
+          <View style={styles.teamHeaderRow}>
+            <Text style={[styles.teamHeaderName, styles.homeCol]} numberOfLines={1}>{item.home_team_name}</Text>
+            <View style={styles.cmpLabelCol} />
+            <Text style={[styles.teamHeaderName, styles.awayCol]} numberOfLines={1}>{item.away_team_name}</Text>
           </View>
-          <StatBadge label="Form Str." home={item.home_form_strength} away={item.away_form_strength} />
-          <StatBadge label="Scoring" home={item.home_scoring_strength} away={item.away_scoring_strength} />
-          <StatBadge label="Defending" home={item.home_defending_strength} away={item.away_defending_strength} />
-          <StatBadge label="Avg Goals" home={item.home_avg_goals_scored} away={item.away_avg_goals_scored} />
-          <StatBadge label="Avg xG" home={item.home_avg_xg} away={item.away_avg_xg} />
-          <StatBadge label="Possession %" home={item.home_avg_possession} away={item.away_avg_possession} />
-          <StatBadge label="Shots on Tgt" home={item.home_avg_shots_on_target} away={item.away_avg_shots_on_target} />
-          <View style={styles.analyzedRow}>
-            <Text style={styles.analyzedText}>
-              Analyzed: {item.home_matches_analyzed ?? "—"} vs {item.away_matches_analyzed ?? "—"} matches
-            </Text>
+
+          {/* ── Role strengths ── */}
+          <SectionHeader label={`Last ${analyzed} Role Strengths`} />
+          <StrengthRow label="Defensive" note="duels, recoveries, clearances, errors"
+            home={h("phase_defensive")} away={a("phase_defensive")} />
+          <StrengthRow label="Attack" note="xG, shots, big chances, xA, dribbles"
+            home={h("phase_attack")} away={a("phase_attack")} />
+          <StrengthRow label="Midfield" note="progression, recoveries, passing, creativity"
+            home={h("phase_midfield")} away={a("phase_midfield")} />
+          <StrengthRow label="Keeper" note="saves, goals prevented, high claims, sweeper"
+            home={h("phase_keeper")} away={a("phase_keeper")} />
+          <StrengthRow label="Full-back" note="crosses, carries, tackles, flank progression"
+            home={h("phase_fullback")} away={a("phase_fullback")} />
+
+          {/* ── Form strengths ── */}
+          <SectionHeader label="Recent Form Strengths" />
+          <StrengthRow label="Form" note="3 win · 1 draw · 0 loss · +2 big win · +1 CS · -1 draw/0-0"
+            home={h("form_strength")} away={a("form_strength")} />
+          <StrengthRow label="Scoring" note="goals per match, scoring rate, big-win margin"
+            home={h("scoring_strength")} away={a("scoring_strength")} />
+          <StrengthRow label="Defending" note="goals conceded per match & clean-sheet rate"
+            home={h("defending_strength")} away={a("defending_strength")} />
+
+          {/* Form summaries */}
+          <View style={styles.formSummaryBox}>
+            <FormSummaryLine teamName={item.home_team_name} m={{
+              form_points: h("form_points"), goals_for: h("goals_for"),
+              goals_against: h("goals_against"), clean_sheets: h("clean_sheets"),
+              recent_form: h("recent_form"),
+            }} />
+            <FormSummaryLine teamName={item.away_team_name} m={{
+              form_points: a("form_points"), goals_for: a("goals_for"),
+              goals_against: a("goals_against"), clean_sheets: a("clean_sheets"),
+              recent_form: a("recent_form"),
+            }} />
           </View>
+
+          {/* ── Match stats table ── */}
+          <SectionHeader label={`Team Match Stats · ${analyzed} matches · ${statsCount}/${analyzed} with full data`} />
+
+          {/* Column labels */}
+          <View style={styles.statsLabelRow}>
+            <Text style={[styles.statsLabelText, styles.homeCol]}>Home</Text>
+            <Text style={styles.cmpLabel}>Avg Full Match</Text>
+            <Text style={[styles.statsLabelText, styles.awayCol]}>Away</Text>
+          </View>
+
+          <CmpRow label="Goals Scored" home={fmt(h("avg_goals_scored"))} away={fmt(a("avg_goals_scored"))} highlight />
+          <CmpRow label="Goals Conceded" home={fmt(h("avg_goals_conceded"))} away={fmt(a("avg_goals_conceded"))} />
+
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Match Overview</Text></View>
+          <CmpRow label="Possession" home={fmtPct(h("avg_possession"))} away={fmtPct(a("avg_possession"))} />
+          <CmpRow label="Expected Goals (xG)" home={fmt(h("avg_xg"))} away={fmt(a("avg_xg"))} />
+          <CmpRow label="Big Chances" home={fmt(h("avg_big_chances"))} away={fmt(a("avg_big_chances"))} />
+          <CmpRow label="Total Shots" home={fmt(h("avg_total_shots"))} away={fmt(a("avg_total_shots"))} />
+          <CmpRow label="Corner Kicks" home={fmt(h("avg_corner_kicks"))} away={fmt(a("avg_corner_kicks"))} />
+          <CmpRow label="Fouls" home={fmt(h("avg_fouls"))} away={fmt(a("avg_fouls"))} />
+
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Shooting</Text></View>
+          <CmpRow label="Shots on Target" home={fmt(h("avg_shots_on_target"))} away={fmt(a("avg_shots_on_target"))} />
+          <CmpRow label="Shots off Target" home={fmt(h("avg_shots_off_target"))} away={fmt(a("avg_shots_off_target"))} />
+          <CmpRow label="Blocked Shots" home={fmt(h("avg_blocked_shots"))} away={fmt(a("avg_blocked_shots"))} />
+          <CmpRow label="Shots Inside Box" home={fmt(h("avg_shots_inside_box"))} away={fmt(a("avg_shots_inside_box"))} />
+          <CmpRow label="Big Chances Scored" home={fmt(h("avg_big_chances_scored"))} away={fmt(a("avg_big_chances_scored"))} />
+          <CmpRow label="Big Chances Missed" home={fmt(h("avg_big_chances_missed"))} away={fmt(a("avg_big_chances_missed"))} />
+
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Passing</Text></View>
+          <CmpRow label="Pass Accuracy" home={h("avg_pass_accuracy") != null ? fmtPct(h("avg_pass_accuracy")) : "—"} away={a("avg_pass_accuracy") != null ? fmtPct(a("avg_pass_accuracy")) : "—"} />
+          <CmpRow label="Total Passes" home={fmt(h("avg_total_passes"), 0)} away={fmt(a("avg_total_passes"), 0)} />
+
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Defending</Text></View>
+          <CmpRow label="Duels Won" home={fmt(h("avg_duels_won"))} away={fmt(a("avg_duels_won"))} />
+          <CmpRow label="Tackles Won %" home={h("avg_tackles_won") != null ? fmtPct(h("avg_tackles_won")) : "—"} away={a("avg_tackles_won") != null ? fmtPct(a("avg_tackles_won")) : "—"} />
+          <CmpRow label="Interceptions" home={fmt(h("avg_interceptions"))} away={fmt(a("avg_interceptions"))} />
+          <CmpRow label="Clearances" home={fmt(h("avg_clearances"))} away={fmt(a("avg_clearances"))} />
+
+          <View style={styles.groupLabel}><Text style={styles.groupLabelText}>Goalkeeping</Text></View>
+          <CmpRow label="GK Saves" home={fmt(h("avg_goalkeeper_saves"))} away={fmt(a("avg_goalkeeper_saves"))} />
+          <CmpRow label="Goals Prevented" home={fmt(h("avg_goals_prevented"))} away={fmt(a("avg_goals_prevented"))} />
+
+          {/* Delete */}
           <TouchableOpacity onPress={confirmDelete} style={styles.deleteBtn} activeOpacity={0.7}>
             <Ionicons name="trash-outline" size={14} color="#f87171" />
-            <Text style={styles.deleteBtnText}>Delete</Text>
+            <Text style={styles.deleteBtnText}>Delete record</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       )}
     </View>
   );
 }
 
+// ─── Screen ─────────────────────────────────────────────────────────────────
+
 export default function DatabaseScreen() {
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSearch = useCallback((text: string) => {
     setSearch(text);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => setDebouncedSearch(text), 400);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setDebounced(text), 400);
   }, []);
 
-  const { data, isLoading, refetch, isRefetching } = useQuery<{ matches: MatchRecord[]; total: number }>({
-    queryKey: ["/api/database/matches", debouncedSearch],
+  const { data, isLoading, refetch, isRefetching } = useQuery<{ matches: M[]; total: number }>({
+    queryKey: ["/api/database/matches", debounced],
     queryFn: async () => {
-      const params = new URLSearchParams({ limit: "200" });
-      if (debouncedSearch) params.set("search", debouncedSearch);
-      const res = await fetch(new URL(`/api/database/matches?${params}`, getApiBase()).href);
+      const p = new URLSearchParams({ limit: "200" });
+      if (debounced) p.set("search", debounced);
+      const res = await fetch(new URL(`/api/database/matches?${p}`, base()).href);
       return res.json();
     },
   });
@@ -165,15 +304,15 @@ export default function DatabaseScreen() {
   const { data: stats } = useQuery<{ total: number; byResult: { result: string; c: number }[] }>({
     queryKey: ["/api/database/stats"],
     queryFn: async () => {
-      const res = await fetch(new URL("/api/database/stats", getApiBase()).href);
+      const res = await fetch(new URL("/api/database/stats", base()).href);
       return res.json();
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: async (eventId: number) => {
-      const res = await fetch(new URL(`/api/database/match/${eventId}`, getApiBase()).href, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete");
+      const res = await fetch(new URL(`/api/database/match/${eventId}`, base()).href, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/database/matches"] });
@@ -182,8 +321,7 @@ export default function DatabaseScreen() {
   });
 
   const matches = data?.matches || [];
-  const total = data?.total ?? 0;
-
+  const total = stats?.total ?? 0;
   const homeWins = stats?.byResult.find((r) => r.result === "H")?.c ?? 0;
   const draws = stats?.byResult.find((r) => r.result === "D")?.c ?? 0;
   const awayWins = stats?.byResult.find((r) => r.result === "A")?.c ?? 0;
@@ -195,46 +333,42 @@ export default function DatabaseScreen() {
     <View style={[styles.container, { paddingTop: topPad }]}>
       <View style={styles.header}>
         <Text style={styles.title}>Database</Text>
-        <Text style={styles.subtitle}>{stats?.total ?? 0} matches stored</Text>
+        <Text style={styles.subtitle}>{total} matches stored</Text>
       </View>
 
-      {(stats?.total ?? 0) > 0 && (
+      {total > 0 && (
         <View style={styles.summaryRow}>
-          <View style={[styles.summaryBadge, { backgroundColor: "#16a34a22" }]}>
-            <Text style={[styles.summaryNum, { color: "#4ade80" }]}>{homeWins}</Text>
-            <Text style={styles.summaryLbl}>Home Wins</Text>
-          </View>
-          <View style={[styles.summaryBadge, { backgroundColor: "#ca8a0422" }]}>
-            <Text style={[styles.summaryNum, { color: "#facc15" }]}>{draws}</Text>
-            <Text style={styles.summaryLbl}>Draws</Text>
-          </View>
-          <View style={[styles.summaryBadge, { backgroundColor: "#dc262622" }]}>
-            <Text style={[styles.summaryNum, { color: "#f87171" }]}>{awayWins}</Text>
-            <Text style={styles.summaryLbl}>Away Wins</Text>
-          </View>
+          {[
+            { label: "Home Wins", count: homeWins, color: "#4ade80", bg: "#16a34a22" },
+            { label: "Draws", count: draws, color: "#facc15", bg: "#ca8a0422" },
+            { label: "Away Wins", count: awayWins, color: "#f87171", bg: "#dc262622" },
+          ].map(({ label, count, color, bg }) => (
+            <View key={label} style={[styles.summaryBadge, { backgroundColor: bg }]}>
+              <Text style={[styles.summaryNum, { color }]}>{count}</Text>
+              <Text style={styles.summaryLbl}>{label}</Text>
+            </View>
+          ))}
         </View>
       )}
 
       <View style={styles.searchRow}>
-        <Ionicons name="search-outline" size={16} color="#6b7280" style={styles.searchIcon} />
+        <Ionicons name="search-outline" size={16} color="#6b7280" style={{ marginRight: 8 }} />
         <TextInput
           style={styles.searchInput}
           value={search}
           onChangeText={onSearch}
-          placeholder="Search teams, tournament..."
+          placeholder="Search teams or tournament..."
           placeholderTextColor="#6b7280"
         />
         {search.length > 0 && (
-          <TouchableOpacity onPress={() => { setSearch(""); setDebouncedSearch(""); }}>
+          <TouchableOpacity onPress={() => { setSearch(""); setDebounced(""); }}>
             <Ionicons name="close-circle" size={18} color="#6b7280" />
           </TouchableOpacity>
         )}
       </View>
 
       {isLoading ? (
-        <View style={styles.center}>
-          <ActivityIndicator color="#3b82f6" />
-        </View>
+        <View style={styles.center}><ActivityIndicator color="#3b82f6" /></View>
       ) : matches.length === 0 ? (
         <View style={styles.center}>
           <Ionicons name="server-outline" size={48} color="#374151" />
@@ -248,11 +382,11 @@ export default function DatabaseScreen() {
           renderItem={({ item }) => (
             <MatchCard item={item} onDelete={(id) => deleteMutation.mutate(id)} />
           )}
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: botPad + 100, paddingTop: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: botPad + 100, paddingTop: 8 }}
           refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refetch} tintColor="#3b82f6" />}
           ListHeaderComponent={
             <Text style={styles.countText}>
-              Showing {matches.length}{total > matches.length ? ` of ${total}` : ""} records
+              Showing {matches.length}{data?.total && data.total > matches.length ? ` of ${data.total}` : ""} records
             </Text>
           }
         />
@@ -261,90 +395,114 @@ export default function DatabaseScreen() {
   );
 }
 
+// ─── Styles ─────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0f0f0f" },
   header: { paddingHorizontal: 20, paddingVertical: 12 },
   title: { fontSize: 24, fontWeight: "700", color: "#f9fafb" },
   subtitle: { fontSize: 13, color: "#6b7280", marginTop: 2 },
-  summaryRow: { flexDirection: "row", paddingHorizontal: 16, gap: 10, marginBottom: 8 },
+
+  summaryRow: { flexDirection: "row", paddingHorizontal: 14, gap: 8, marginBottom: 8 },
   summaryBadge: { flex: 1, borderRadius: 10, padding: 10, alignItems: "center" },
-  summaryNum: { fontSize: 22, fontWeight: "700" },
+  summaryNum: { fontSize: 20, fontWeight: "700" },
   summaryLbl: { fontSize: 11, color: "#9ca3af", marginTop: 2 },
+
   searchRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginHorizontal: 16,
-    marginBottom: 8,
-    backgroundColor: "#1f2937",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    flexDirection: "row", alignItems: "center", marginHorizontal: 14, marginBottom: 8,
+    backgroundColor: "#1f2937", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8,
   },
-  searchIcon: { marginRight: 8 },
   searchInput: { flex: 1, color: "#f9fafb", fontSize: 14 },
+
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
   emptyText: { color: "#9ca3af", fontSize: 16, fontWeight: "600" },
   emptySubtext: { color: "#6b7280", fontSize: 13, textAlign: "center", paddingHorizontal: 32 },
   countText: { fontSize: 12, color: "#6b7280", marginBottom: 8 },
+
+  // Card
   card: {
-    backgroundColor: "#1a1a2e",
-    borderRadius: 12,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#1f2937",
-    overflow: "hidden",
+    backgroundColor: "#111827", borderRadius: 12, marginBottom: 10,
+    borderWidth: 1, borderColor: "#1f2937", overflow: "hidden",
   },
-  cardHeader: { padding: 14 },
-  cardMain: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
-  resultDot: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  resultDotText: { fontSize: 11, fontWeight: "700", color: "#000" },
+  cardHeader: { padding: 13 },
+  cardMain: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 5 },
+  resultDot: { width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center" },
+  resultDotText: { fontSize: 10, fontWeight: "700", color: "#000" },
   teamsRow: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  teamName: { fontSize: 13, fontWeight: "600", color: "#e5e7eb", flex: 1 },
-  score: { fontSize: 15, fontWeight: "700", color: "#f9fafb", paddingHorizontal: 10 },
+  teamName: { fontSize: 12, fontWeight: "600", color: "#e5e7eb", flex: 1 },
+  score: { fontSize: 15, fontWeight: "700", color: "#f9fafb", paddingHorizontal: 8 },
   cardMeta: { flexDirection: "row", justifyContent: "space-between" },
   metaText: { fontSize: 11, color: "#6b7280" },
-  expandedSection: {
-    borderTopWidth: 1,
-    borderTopColor: "#1f2937",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: "#111827",
+
+  // Expanded
+  expandedScroll: { maxHeight: 600, borderTopWidth: 1, borderTopColor: "#1f2937" },
+
+  teamHeaderRow: {
+    flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: "#0f172a",
   },
-  statsHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 6,
-    paddingBottom: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: "#1f2937",
+  teamHeaderName: { fontSize: 12, fontWeight: "700", color: "#93c5fd" },
+
+  sectionHeader: {
+    backgroundColor: "#0f172a", paddingHorizontal: 12, paddingVertical: 6,
+    borderTopWidth: 1, borderTopColor: "#1e3a5f33",
   },
-  statsHeaderText: { fontSize: 11, fontWeight: "600", color: "#6b7280" },
-  statRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
-  statLabel: { fontSize: 12, color: "#9ca3af" },
-  statValue: { fontSize: 12 },
-  homeVal: { color: "#60a5fa" },
-  awayVal: { color: "#f87171" },
-  statSep: { color: "#6b7280" },
-  analyzedRow: { marginTop: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: "#1f2937" },
-  analyzedText: { fontSize: 11, color: "#6b7280" },
+  sectionHeaderText: { fontSize: 11, fontWeight: "700", color: "#60a5fa", textTransform: "uppercase", letterSpacing: 0.5 },
+
+  // Strength rows
+  strengthRow: {
+    flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#1f2937",
+  },
+  strengthBarSide: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
+  strengthBarBg: { flex: 1, height: 4, backgroundColor: "#1f2937", borderRadius: 2, overflow: "hidden" },
+  strengthBarFill: { height: "100%", borderRadius: 2 },
+  strengthBarHome: { backgroundColor: "#3b82f6", alignSelf: "flex-start" },
+  strengthBarAway: { backgroundColor: "#ef4444", alignSelf: "flex-end" },
+  strengthNum: { fontSize: 13, fontWeight: "700", minWidth: 28 },
+  homeNum: { color: "#60a5fa", textAlign: "right" },
+  awayNum: { color: "#f87171", textAlign: "left" },
+  strengthLabelCol: { width: 120, alignItems: "center", paddingHorizontal: 4 },
+  strengthLabel: { fontSize: 12, fontWeight: "600", color: "#d1d5db", textAlign: "center" },
+  strengthNote: { fontSize: 9, color: "#6b7280", textAlign: "center", marginTop: 1 },
+
+  // Form summary
+  formSummaryBox: { backgroundColor: "#0a0f1a", paddingHorizontal: 12, paddingVertical: 10 },
+  formSummaryLine: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 5 },
+  formSummaryTeam: { fontSize: 12, fontWeight: "700", color: "#9ca3af", width: 70 },
+  formSummaryStats: { fontSize: 11, color: "#6b7280", flex: 1 },
+  formInline: { flexDirection: "row", gap: 2 },
+  formRow: { flexDirection: "row", gap: 2 },
+  formChar: { fontSize: 11, fontWeight: "700" },
+  formDash: { fontSize: 11, color: "#6b7280" },
+
+  // Stats table
+  statsLabelRow: {
+    flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 5,
+    backgroundColor: "#0f172a",
+  },
+  statsLabelText: { fontSize: 11, fontWeight: "600", color: "#6b7280" },
+  groupLabel: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 3 },
+  groupLabelText: { fontSize: 10, fontWeight: "700", color: "#4b5563", textTransform: "uppercase", letterSpacing: 0.5 },
+
+  cmpRow: {
+    flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 5,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#1f2937",
+  },
+  cmpRowHighlight: { backgroundColor: "#0f1f0f" },
+  cmpVal: { fontSize: 13, fontWeight: "600", color: "#f9fafb", minWidth: 44 },
+  cmpLabel: { fontSize: 12, color: "#9ca3af", textAlign: "center" },
+  cmpNote: { fontSize: 10, color: "#6b7280", textAlign: "center" },
+  cmpLabelCol: { flex: 1, alignItems: "center" },
+  homeCol: { textAlign: "left", color: "#60a5fa" },
+  awayCol: { textAlign: "right", color: "#f87171" },
+
   deleteBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 10,
-    alignSelf: "flex-end",
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    backgroundColor: "#1f1414",
-    borderWidth: 1,
-    borderColor: "#7f1d1d",
+    flexDirection: "row", alignItems: "center", gap: 6,
+    margin: 12, alignSelf: "flex-end",
+    paddingVertical: 6, paddingHorizontal: 10,
+    borderRadius: 6, backgroundColor: "#1f1414",
+    borderWidth: 1, borderColor: "#7f1d1d",
   },
   deleteBtnText: { fontSize: 12, color: "#f87171", fontWeight: "600" },
 });

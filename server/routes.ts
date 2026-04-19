@@ -301,7 +301,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             goalsAgainst,
             cleanSheets,
             matches,
-            recentForm: results.slice(0, 5).map((result) => result.result),
+            recentForm: results.slice(0, 8).map((result) => result.result),
           };
         }
 
@@ -879,7 +879,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             goalsAgainst,
             cleanSheets,
             matches,
-            recentForm: results.slice(0, 5).map((result) => result.result),
+            recentForm: results.slice(0, 8).map((result) => result.result),
           };
         }
 
@@ -2002,44 +2002,64 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const aStats = a?.teamMatchStats?.all;
             const hPhase = h?.phaseStrengths;
             const aPhase = a?.phaseStrengths;
+            const hForm = h?.formSummary;
+            const aForm = a?.formSummary;
 
             db.prepare(`
               INSERT OR REPLACE INTO match_simulations (
                 event_id, home_team_id, home_team_name, away_team_id, away_team_name,
                 tournament, sport, match_date, start_timestamp,
                 home_goals, away_goals, result,
+                home_phase_defensive, home_phase_attack, home_phase_midfield, home_phase_keeper, home_phase_fullback,
                 home_form_strength, home_scoring_strength, home_defending_strength,
-                home_phase_defensive, home_phase_attack, home_phase_midfield, home_phase_keeper,
+                home_form_points, home_goals_for, home_goals_against, home_clean_sheets, home_recent_form,
                 home_avg_goals_scored, home_avg_goals_conceded, home_avg_xg, home_avg_possession,
-                home_avg_big_chances, home_avg_total_shots, home_avg_shots_on_target,
-                home_avg_pass_accuracy, home_avg_tackles_won, home_avg_interceptions, home_avg_corner_kicks,
-                home_matches_analyzed,
+                home_avg_big_chances, home_avg_total_shots, home_avg_shots_on_target, home_avg_shots_off_target,
+                home_avg_blocked_shots, home_avg_shots_inside_box, home_avg_big_chances_scored, home_avg_big_chances_missed,
+                home_avg_corner_kicks, home_avg_fouls, home_avg_total_passes, home_avg_pass_accuracy,
+                home_avg_duels_won, home_avg_tackles_won, home_avg_interceptions, home_avg_clearances,
+                home_avg_goalkeeper_saves, home_avg_goals_prevented, home_matches_analyzed,
+                away_phase_defensive, away_phase_attack, away_phase_midfield, away_phase_keeper, away_phase_fullback,
                 away_form_strength, away_scoring_strength, away_defending_strength,
-                away_phase_defensive, away_phase_attack, away_phase_midfield, away_phase_keeper,
+                away_form_points, away_goals_for, away_goals_against, away_clean_sheets, away_recent_form,
                 away_avg_goals_scored, away_avg_goals_conceded, away_avg_xg, away_avg_possession,
-                away_avg_big_chances, away_avg_total_shots, away_avg_shots_on_target,
-                away_avg_pass_accuracy, away_avg_tackles_won, away_avg_interceptions, away_avg_corner_kicks,
-                away_matches_analyzed,
+                away_avg_big_chances, away_avg_total_shots, away_avg_shots_on_target, away_avg_shots_off_target,
+                away_avg_blocked_shots, away_avg_shots_inside_box, away_avg_big_chances_scored, away_avg_big_chances_missed,
+                away_avg_corner_kicks, away_avg_fouls, away_avg_total_passes, away_avg_pass_accuracy,
+                away_avg_duels_won, away_avg_tackles_won, away_avg_interceptions, away_avg_clearances,
+                away_avg_goalkeeper_saves, away_avg_goals_prevented, away_matches_analyzed,
                 processed_at
               ) VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
               )
             `).run(
               eventId, homeTeamId, homeTeamName, awayTeamId, awayTeamName,
               tournament, sport, matchDate, startTimestamp,
               hGoals, aGoals, result,
+              hPhase?.defensiveStrength ?? null, hPhase?.attackStrength ?? null, hPhase?.midfieldStrength ?? null, hPhase?.keeperStrength ?? null, hPhase?.fullbackStrength ?? null,
               h?.formStrength ?? null, h?.scoringStrength ?? null, h?.defendingStrength ?? null,
-              hPhase?.defensiveStrength ?? null, hPhase?.attackStrength ?? null, hPhase?.midfieldStrength ?? null, hPhase?.keeperStrength ?? null,
+              hForm?.formPoints ?? null, hForm?.goalsFor ?? null, hForm?.goalsAgainst ?? null, hForm?.cleanSheets ?? null,
+              (hForm?.recentForm || []).join(" ") || null,
               hStats?.avgGoalsScored ?? null, hStats?.avgGoalsConceded ?? null, hStats?.avgXg ?? null, hStats?.avgPossession ?? null,
-              hStats?.avgBigChances ?? null, hStats?.avgTotalShots ?? null, hStats?.avgShotsOnTarget ?? null,
-              hStats?.avgPassAccuracy ?? null, hStats?.avgTacklesWon ?? null, hStats?.avgInterceptions ?? null, hStats?.avgCornerKicks ?? null,
-              h?.matchesAnalyzed ?? null,
+              hStats?.avgBigChances ?? null, hStats?.avgTotalShots ?? null, hStats?.avgShotsOnTarget ?? null, hStats?.avgShotsOffTarget ?? null,
+              hStats?.avgBlockedShots ?? null, hStats?.avgShotsInsideBox ?? null, hStats?.avgBigChancesScored ?? null, hStats?.avgBigChancesMissed ?? null,
+              hStats?.avgCornerKicks ?? null, hStats?.avgFouls ?? null, hStats?.avgTotalPasses ?? null, hStats?.avgPassAccuracy ?? null,
+              hStats?.avgDuelsWon ?? null, hStats?.avgTacklesWon ?? null, hStats?.avgInterceptions ?? null, hStats?.avgClearances ?? null,
+              hStats?.avgGoalkeeperSaves ?? null, hStats?.avgGoalsPrevented ?? null, h?.matchesAnalyzed ?? null,
+              aPhase?.defensiveStrength ?? null, aPhase?.attackStrength ?? null, aPhase?.midfieldStrength ?? null, aPhase?.keeperStrength ?? null, aPhase?.fullbackStrength ?? null,
               a?.formStrength ?? null, a?.scoringStrength ?? null, a?.defendingStrength ?? null,
-              aPhase?.defensiveStrength ?? null, aPhase?.attackStrength ?? null, aPhase?.midfieldStrength ?? null, aPhase?.keeperStrength ?? null,
+              aForm?.formPoints ?? null, aForm?.goalsFor ?? null, aForm?.goalsAgainst ?? null, aForm?.cleanSheets ?? null,
+              (aForm?.recentForm || []).join(" ") || null,
               aStats?.avgGoalsScored ?? null, aStats?.avgGoalsConceded ?? null, aStats?.avgXg ?? null, aStats?.avgPossession ?? null,
-              aStats?.avgBigChances ?? null, aStats?.avgTotalShots ?? null, aStats?.avgShotsOnTarget ?? null,
-              aStats?.avgPassAccuracy ?? null, aStats?.avgTacklesWon ?? null, aStats?.avgInterceptions ?? null, aStats?.avgCornerKicks ?? null,
-              a?.matchesAnalyzed ?? null,
+              aStats?.avgBigChances ?? null, aStats?.avgTotalShots ?? null, aStats?.avgShotsOnTarget ?? null, aStats?.avgShotsOffTarget ?? null,
+              aStats?.avgBlockedShots ?? null, aStats?.avgShotsInsideBox ?? null, aStats?.avgBigChancesScored ?? null, aStats?.avgBigChancesMissed ?? null,
+              aStats?.avgCornerKicks ?? null, aStats?.avgFouls ?? null, aStats?.avgTotalPasses ?? null, aStats?.avgPassAccuracy ?? null,
+              aStats?.avgDuelsWon ?? null, aStats?.avgTacklesWon ?? null, aStats?.avgInterceptions ?? null, aStats?.avgClearances ?? null,
+              aStats?.avgGoalkeeperSaves ?? null, aStats?.avgGoalsPrevented ?? null, a?.matchesAnalyzed ?? null,
               new Date().toISOString(),
             );
 
