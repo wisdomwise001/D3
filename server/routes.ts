@@ -2386,14 +2386,21 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const aForm = a?.formSummary;
 
             // ── Incomplete data check ────────────────────────────────────────
-            // Skip matches where both teams have fewer than 3 matches with
-            // detailed statistics (xG, possession, shots, etc. would all be "—")
-            const hWithStats = hStats?.matchesWithStats ?? 0;
-            const aWithStats = aStats?.matchesWithStats ?? 0;
-            if (hWithStats < 3 && aWithStats < 3) {
+            // Skip matches where either team is missing the core detailed stats
+            // (xG, possession, total shots). matchesWithStats only counts matches
+            // where ANY stat was found (e.g. fouls), so we test the actual averages
+            // that will be stored — if they're null, the row is training-useless.
+            const hHasDetailedStats = hStats?.avgXg != null && hStats?.avgPossession != null && hStats?.avgTotalShots != null;
+            const aHasDetailedStats = aStats?.avgXg != null && aStats?.avgPossession != null && aStats?.avgTotalShots != null;
+            if (!hHasDetailedStats || !aHasDetailedStats) {
               job.skipped++;
               job.processed++;
-              job.log.push(`⏭ Skipped (incomplete stats — ${hWithStats}/${aWithStats} matches with data): ${homeTeamName} vs ${awayTeamName}`);
+              const reason = !hHasDetailedStats && !aHasDetailedStats
+                ? "both teams missing xG/possession/shots"
+                : !hHasDetailedStats
+                  ? `${homeTeamName} missing xG/possession/shots`
+                  : `${awayTeamName} missing xG/possession/shots`;
+              job.log.push(`⏭ Skipped (incomplete stats — ${reason}): ${homeTeamName} vs ${awayTeamName}`);
               continue;
             }
 
