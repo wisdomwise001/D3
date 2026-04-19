@@ -91,12 +91,12 @@ export default function EngineScreen() {
   });
 
   useEffect(() => {
-    if (progress?.running === false && polling) {
+    if (progress !== undefined && progress.running === false && polling) {
       setPolling(false);
       refetchStatus();
       queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
     }
-  }, [progress?.running, polling]);
+  }, [progress, polling]);
 
   const trainMutation = useMutation({
     mutationFn: async () => {
@@ -108,7 +108,11 @@ export default function EngineScreen() {
       return res.json();
     },
     onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["/api/engine/training-progress"] });
       setPolling(true);
+    },
+    onError: (err: Error) => {
+      Alert.alert("Training Error", err.message, [{ text: "OK" }]);
     },
   });
 
