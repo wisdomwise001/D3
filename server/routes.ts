@@ -29,6 +29,112 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function determineScaling(totalShots: number, totalBigChances: number): number {
+  if (totalShots > 25 || totalBigChances >= 7) return 0.67;
+  if (totalShots < 18 || totalBigChances <= 3) return 0.72;
+  return 0.70;
+}
+
+function calculateCustomXG(
+  shots: number | null,
+  bigChances: number | null,
+  shotsOnTarget: number | null,
+  blockedShots: number | null,
+  opponentShots: number | null,
+  opponentBigChances: number | null,
+): number | null {
+  if (shots === null && shotsOnTarget === null && bigChances === null) return null;
+  const S = shots ?? 0;
+  const BC = bigChances ?? 0;
+  const SoT = shotsOnTarget ?? 0;
+  const B = blockedShots ?? 0;
+  const rawXG = (S * 0.05) + (BC * 0.25) + (SoT * 0.10) - (B * 0.03);
+  const totalShots = S + (opponentShots ?? S);
+  const totalBC = BC + (opponentBigChances ?? BC);
+  const scaling = determineScaling(totalShots, totalBC);
+  let xg = rawXG * scaling;
+  if (BC === 0 && SoT <= 2) xg = Math.min(xg, 0.60);
+  if (BC >= 4) xg = Math.max(xg, 1.50);
+  if (S < 10) xg = Math.min(xg, 1.60);
+  if (S > 20) xg = Math.min(xg, 3.50);
+  if (xg > 4.00) xg = 4.00 + (xg - 4.00) * 0.50;
+  return Math.round(xg * 100) / 100;
+}
+
+function injectCustomXGIntoStatistics(data: any): any {
+  if (!data?.statistics) return data;
+  const statistics: any[] = data.statistics;
+
+  for (const period of statistics) {
+    const groups: any[] = period.groups || [];
+
+    const getStatVal = (side: "home" | "away", names: string[]): number | null => {
+      for (const group of groups) {
+        for (const item of (group.statisticsItems || [])) {
+          const n = (item.name || "").toLowerCase().trim();
+          if (names.some(name => n === name || n.includes(name))) {
+            const raw = String(item[side] ?? "").replace(/[^0-9.\-]/g, "");
+            const v = parseFloat(raw);
+            return Number.isFinite(v) ? v : null;
+          }
+        }
+      }
+      return null;
+    };
+
+    const homeShots = getStatVal("home", ["total shots", "shots total"]);
+    const awayShots = getStatVal("away", ["total shots", "shots total"]);
+    const homeBC = getStatVal("home", ["big chances"]);
+    const awayBC = getStatVal("away", ["big chances"]);
+    const homeSoT = getStatVal("home", ["shots on target"]);
+    const awaySoT = getStatVal("away", ["shots on target"]);
+    const homeBlocked = getStatVal("home", ["blocked shots"]);
+    const awayBlocked = getStatVal("away", ["blocked shots"]);
+
+    const homeXG = calculateCustomXG(homeShots, homeBC, homeSoT, homeBlocked, awayShots, awayBC);
+    const awayXG = calculateCustomXG(awayShots, awayBC, awaySoT, awayBlocked, homeShots, homeBC);
+
+    if (homeXG === null && awayXG === null) continue;
+
+    let xgItem: any = null;
+    let targetGroup: any = null;
+
+    for (const group of groups) {
+      for (const item of (group.statisticsItems || [])) {
+        const n = (item.name || "").toLowerCase().trim();
+        if (n.includes("expected goals") || n === "xg") {
+          xgItem = item;
+          targetGroup = group;
+          break;
+        }
+      }
+      if (xgItem) break;
+    }
+
+    if (xgItem) {
+      xgItem.home = homeXG !== null ? String(homeXG) : xgItem.home;
+      xgItem.away = awayXG !== null ? String(awayXG) : xgItem.away;
+    } else {
+      const shotsGroup = groups.find(g => {
+        const name = (g.groupName || "").toLowerCase();
+        return name.includes("shot") || name.includes("attack");
+      }) || groups[0];
+
+      if (shotsGroup) {
+        if (!shotsGroup.statisticsItems) shotsGroup.statisticsItems = [];
+        shotsGroup.statisticsItems.unshift({
+          name: "Expected Goals (xG)",
+          home: homeXG !== null ? String(homeXG) : "0.00",
+          away: awayXG !== null ? String(awayXG) : "0.00",
+          statisticsType: "positive",
+        });
+      }
+    }
+  }
+
+  return data;
+}
+
 const SOFASCORE_HEADERS: Record<string, string> = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -709,8 +815,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
               }
               return null;
             };
+            const opp = extractPeriodStats(statsData, oppSide, period);
+            const oppGet = (keys: string[]): number | null => {
+              for (const k of keys) {
+                const found = Object.keys(opp).find((name) => name === k || name.includes(k));
+                if (found !== undefined) return opp[found];
+              }
+              return null;
+            };
             addS("possession", get(["ball possession"]));
-            addS("xg", get(["expected goals (xg)", "expected goals"]));
+            const customXG = calculateCustomXG(
+              get(["total shots", "shots total"]),
+              get(["big chances"]),
+              get(["shots on target"]),
+              get(["blocked shots"]),
+              oppGet(["total shots", "shots total"]),
+              oppGet(["big chances"]),
+            );
+            addS("xg", customXG);
             addS("bigChances", get(["big chances"]));
             addS("totalShots", get(["total shots", "shots total"]));
             addS("shotsOnTarget", get(["shots on target"]));
@@ -1423,7 +1545,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const data = await fetchSofaScore(
           `/event/${req.params.eventId}/statistics`,
         );
-        res.json(data);
+        res.json(injectCustomXGIntoStatistics(data));
       } catch (error: any) {
         res.status(500).json({ error: error.message });
       }
