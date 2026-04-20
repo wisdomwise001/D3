@@ -821,6 +821,10 @@ class XGEngine {
     this.persisted = p;
   }
 
+  isTrained(): boolean {
+    return !!(this.annModel && this.rfModels && this.gbmLive && this.metaModel && this.persisted);
+  }
+
   getStatus(): EngineStatus {
     try {
       const row: any = db.prepare(

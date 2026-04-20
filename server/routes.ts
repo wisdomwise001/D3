@@ -1992,6 +1992,11 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
   // ─── xG Engine: predict for stored match ──────────────────────────────────
   app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {
     try {
+      // Fail fast: no point fetching SofaScore data if there's no trained model
+      if (!engine.isTrained()) {
+        return res.status(400).json({ error: "Engine not trained. Train from the Engine tab first." });
+      }
+
       const eventId = Number(req.params.eventId);
 
       // 1. Check DB for match metadata (scores, teams)
@@ -2012,7 +2017,7 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
         const baseUrl = `http://localhost:${serverPort}`;
         const simRes = await fetch(
           `${baseUrl}/api/event/${eventId}/player-simulation?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}`,
-          { signal: AbortSignal.timeout(30000) }
+          { signal: AbortSignal.timeout(8000) }
         );
 
         if (!simRes.ok) {
