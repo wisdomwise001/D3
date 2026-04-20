@@ -85,8 +85,17 @@ export const FEATURE_NAMES = [
   "home_injury_impact", "away_injury_impact",
   // ── League / country context (label-encoded; 0 = unknown) ─────────────────
   "league_encoded", "country_encoded",
+  // ── GSRM: Game State Resilience Metrics (behavioral patterns) ─────────────
+  "home_gsrm_ecri", "away_gsrm_ecri",
+  "home_gsrm_eri",  "away_gsrm_eri",
+  "home_gsrm_tgbi", "away_gsrm_tgbi",
+  "home_gsrm_frqi", "away_gsrm_frqi",
+  // ── SSBI: Score State Breakability Index ──────────────────────────────────
+  "home_ssbi_zzb", "away_ssbi_zzb",
+  "home_ssbi_lbr", "away_ssbi_lbr",
+  "home_ssbi_ddi", "away_ssbi_ddi",
 ];
-export const N_FEATURES = FEATURE_NAMES.length; // 96
+export const N_FEATURES = FEATURE_NAMES.length; // 110
 
 export const TARGET_NAMES = [
   "home_ft_xg", "away_ft_xg",
@@ -198,7 +207,7 @@ async function trainANN(
   const xs = tf.tensor2d(features);
   const ys = tf.tensor2d(targets);
 
-  const totalEpochs = 200;
+  const totalEpochs = 80;
   await model.fit(xs, ys, {
     epochs: totalEpochs,
     batchSize: Math.min(32, Math.floor(features.length / 4)),
@@ -207,7 +216,12 @@ async function trainANN(
     verbose: 0,
     callbacks: {
       onEpochEnd: async (epoch: number) => {
-        if (epoch % 20 === 0) onProgress?.(epoch, totalEpochs);
+        onProgress?.(epoch, totalEpochs);
+        // Yield to the Node.js event loop every 5 epochs so the server stays
+        // responsive during training (prevents event-loop starvation / timeouts)
+        if (epoch % 5 === 0) {
+          await new Promise(resolve => setImmediate(resolve));
+        }
       },
     },
   });
@@ -487,16 +501,18 @@ async function fitRF(
     await new Promise(resolve => setImmediate(resolve));
     const y = targets.map(row => row[t]);
     const rf = new RandomForestRegression({
-      nEstimators: 50,
-      maxFeatures: 0.65,
+      nEstimators: 20,
+      maxFeatures: 0.6,
       replacement: true,
       useSampleBagging: true,
-      treeOptions: { maxDepth: 6, minNumSamples: 3 },
+      treeOptions: { maxDepth: 4, minNumSamples: 4 },
       seed: 42 + t,
     });
     rf.train(normFeatures, y);
     models.push(rf);
     modelJsons.push(JSON.stringify(rf.toJSON()));
+    // Extra yield after each training run (tree training is fully synchronous)
+    await new Promise(resolve => setImmediate(resolve));
   }
 
   return { models, state: { modelJsons } };
@@ -920,22 +936,48 @@ class XGEngine {
     await new Promise(resolve => setImmediate(resolve));
 
     // ── 6. Random Forest ──────────────────────────────────────────────────────
-    prog(48, "Training Random Forest with ml-random-forest (50 CART trees)...");
-    const { models: rfLive, state: rfState } = await fitRF(normFeatures, allTargets, (pct) => {
-      prog(48 + pct * 0.14, `RF training target ${Math.round(pct / (100 / N_TARGETS) + 1)}/${N_TARGETS}...`);
-    });
-    this.rfModels = rfLive;
-    const rfPreds = normFeatures.map(x => rfPredict(x, rfLive));
-    prog(62, "Random Forest training complete.");
+    prog(48, "Training Random Forest with ml-random-forest (20 CART trees)...");
+    let rfLive: RandomForestRegression[];
+    let rfState: RFState;
+    let rfPreds: number[][];
+    try {
+      const rfResult = await fitRF(normFeatures, allTargets, (pct) => {
+        prog(48 + pct * 0.14, `RF training target ${Math.round(pct / (100 / N_TARGETS) + 1)}/${N_TARGETS}...`);
+      });
+      rfLive = rfResult.models;
+      rfState = rfResult.state;
+      this.rfModels = rfLive;
+      rfPreds = normFeatures.map(x => rfPredict(x, rfLive));
+      prog(62, "Random Forest training complete.");
+    } catch (rfErr: any) {
+      console.warn("[Engine] RF training failed — falling back to ANN predictions:", rfErr.message);
+      rfLive = [];
+      rfState = { modelJsons: [] };
+      rfPreds = annPreds; // fall back to ANN as RF proxy
+      prog(62, "RF skipped (fallback to ANN).");
+    }
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 7. GBM ────────────────────────────────────────────────────────────────
-    prog(64, "Training Gradient Boosting (ml-cart CART trees, 30 iterations)...");
-    const { state: gbmState } = await fitGBM(normFeatures, allTargets, 30, 0.08, (pct) => {
-      prog(64 + pct * 0.12, `GBM ${pct.toFixed(0)}%...`);
-    });
-    this.gbmLive = restoreGBM(gbmState);
-    const gbmPreds = normFeatures.map(x => gbmPredict(x, this.gbmLive!));
-    prog(76, "GBM training complete.");
+    prog(64, "Training Gradient Boosting (ml-cart CART trees, 20 iterations)...");
+    let gbmState: GBMState;
+    let gbmPreds: number[][];
+    try {
+      const gbmResult = await fitGBM(normFeatures, allTargets, 20, 0.08, (pct) => {
+        prog(64 + pct * 0.12, `GBM ${pct.toFixed(0)}%...`);
+      });
+      gbmState = gbmResult.state;
+      this.gbmLive = restoreGBM(gbmState);
+      gbmPreds = normFeatures.map(x => gbmPredict(x, this.gbmLive!));
+      prog(76, "GBM training complete.");
+    } catch (gbmErr: any) {
+      console.warn("[Engine] GBM training failed — falling back to ANN predictions:", gbmErr.message);
+      gbmState = { basePredictions: Array(N_TARGETS).fill(0), treesPerTarget: [] };
+      this.gbmLive = restoreGBM(gbmState);
+      gbmPreds = annPreds;
+      prog(76, "GBM skipped (fallback to ANN).");
+    }
+    await new Promise(resolve => setImmediate(resolve));
 
     // ── 8. Causal ─────────────────────────────────────────────────────────────
     prog(78, "Fitting Causal Model (ml-regression OLS)...");

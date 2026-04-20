@@ -254,6 +254,22 @@ col("home_suspended_players", "TEXT");
 col("away_suspended_players", "TEXT");
 col("home_injury_impact", "REAL");
 col("away_injury_impact", "REAL");
+// GSRM (Game State Resilience Metrics)
+col("home_gsrm_ecri", "REAL");
+col("away_gsrm_ecri", "REAL");
+col("home_gsrm_eri", "REAL");
+col("away_gsrm_eri", "REAL");
+col("home_gsrm_tgbi", "REAL");
+col("away_gsrm_tgbi", "REAL");
+col("home_gsrm_frqi", "REAL");
+col("away_gsrm_frqi", "REAL");
+// SSBI (Score State Breakability Index)
+col("home_ssbi_zzb", "REAL");
+col("away_ssbi_zzb", "REAL");
+col("home_ssbi_lbr", "REAL");
+col("away_ssbi_lbr", "REAL");
+col("home_ssbi_ddi", "REAL");
+col("away_ssbi_ddi", "REAL");
 
 // ── Startup: prune stored matches that are missing the key half-period stats ─
 // Matches missing 1H/2H possession or shots will always show "—" in the UI

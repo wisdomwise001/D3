@@ -2628,6 +2628,24 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
           away_h2_avg_total_shots:      aStats2h?.avgTotalShots         ?? null,
           away_h2_avg_possession:       aStats2h?.avgPossession         ?? null,
           away_h2_avg_pass_accuracy:    aStats2h?.avgPassAccuracy       ?? null,
+
+          // ── GSRM (Game State Resilience Metrics) ──────────────────────────
+          home_gsrm_ecri:               sim.home?.gsrm?.ecri            ?? null,
+          away_gsrm_ecri:               sim.away?.gsrm?.ecri            ?? null,
+          home_gsrm_eri:                sim.home?.gsrm?.eri             ?? null,
+          away_gsrm_eri:                sim.away?.gsrm?.eri             ?? null,
+          home_gsrm_tgbi:               sim.home?.gsrm?.tgbi            ?? null,
+          away_gsrm_tgbi:               sim.away?.gsrm?.tgbi            ?? null,
+          home_gsrm_frqi:               sim.home?.gsrm?.frqi            ?? null,
+          away_gsrm_frqi:               sim.away?.gsrm?.frqi            ?? null,
+
+          // ── SSBI (Score State Breakability Index) ─────────────────────────
+          home_ssbi_zzb:                sim.home?.ssbi?.zzb             ?? null,
+          away_ssbi_zzb:                sim.away?.ssbi?.zzb             ?? null,
+          home_ssbi_lbr:                sim.home?.ssbi?.lbr             ?? null,
+          away_ssbi_lbr:                sim.away?.ssbi?.lbr             ?? null,
+          home_ssbi_ddi:                sim.home?.ssbi?.ddi             ?? null,
+          away_ssbi_ddi:                sim.away?.ssbi?.ddi             ?? null,
         };
 
         // Merge real scores / result from DB row if this match has been played
@@ -2893,6 +2911,23 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
             const hInjuryImpact = h?.injuryImpact ?? 0;
             const aInjuryImpact = a?.injuryImpact ?? 0;
 
+            // GSRM metrics
+            const hGsrmEcri = sim.home?.gsrm?.ecri ?? null;
+            const aGsrmEcri = sim.away?.gsrm?.ecri ?? null;
+            const hGsrmEri  = sim.home?.gsrm?.eri  ?? null;
+            const aGsrmEri  = sim.away?.gsrm?.eri  ?? null;
+            const hGsrmTgbi = sim.home?.gsrm?.tgbi ?? null;
+            const aGsrmTgbi = sim.away?.gsrm?.tgbi ?? null;
+            const hGsrmFrqi = sim.home?.gsrm?.frqi ?? null;
+            const aGsrmFrqi = sim.away?.gsrm?.frqi ?? null;
+            // SSBI metrics
+            const hSsbiZzb = sim.home?.ssbi?.zzb ?? null;
+            const aSsbiZzb = sim.away?.ssbi?.zzb ?? null;
+            const hSsbiLbr = sim.home?.ssbi?.lbr ?? null;
+            const aSsbiLbr = sim.away?.ssbi?.lbr ?? null;
+            const hSsbiDdi = sim.home?.ssbi?.ddi ?? null;
+            const aSsbiDdi = sim.away?.ssbi?.ddi ?? null;
+
             db.prepare(`
               INSERT OR REPLACE INTO match_simulations (
                 event_id, home_team_id, home_team_name, away_team_id, away_team_name,
@@ -2924,7 +2959,14 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 processed_at,
                 home_injured_players, away_injured_players,
                 home_suspended_players, away_suspended_players,
-                home_injury_impact, away_injury_impact
+                home_injury_impact, away_injury_impact,
+                home_gsrm_ecri, away_gsrm_ecri,
+                home_gsrm_eri,  away_gsrm_eri,
+                home_gsrm_tgbi, away_gsrm_tgbi,
+                home_gsrm_frqi, away_gsrm_frqi,
+                home_ssbi_zzb, away_ssbi_zzb,
+                home_ssbi_lbr, away_ssbi_lbr,
+                home_ssbi_ddi, away_ssbi_ddi
               ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,
@@ -2936,6 +2978,8 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
                 ?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?
               )
             `).run(
@@ -2971,6 +3015,13 @@ Output ONLY a valid JSON object. No markdown, no code blocks, no explanation out
               hInjured, aInjured,
               hSuspended, aSuspended,
               hInjuryImpact, aInjuryImpact,
+              hGsrmEcri, aGsrmEcri,
+              hGsrmEri,  aGsrmEri,
+              hGsrmTgbi, aGsrmTgbi,
+              hGsrmFrqi, aGsrmFrqi,
+              hSsbiZzb, aSsbiZzb,
+              hSsbiLbr, aSsbiLbr,
+              hSsbiDdi, aSsbiDdi,
             );
 
             job.stored++;
