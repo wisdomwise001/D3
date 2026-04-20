@@ -95,6 +95,25 @@ interface GSRM {
   frqiMatches: number;
 }
 
+interface SSBIBreaker {
+  playerId: number;
+  name: string;
+  zzbGoals: number;
+  ddiGoals: number;
+  total: number;
+  available: boolean | null;
+}
+
+interface SSBI {
+  zzb: number | null;
+  zzbMatches: number;
+  lbr: number | null;
+  lbrMatches: number;
+  ddi: number | null;
+  ddiMatches: number;
+  keyBreakers: SSBIBreaker[];
+}
+
 interface PeriodStats {
   avgGoalsScored: number | null;
   avgGoalsConceded: number | null;
@@ -154,6 +173,7 @@ interface SimulationMetricsResponse {
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
     gsrm?: GSRM | null;
+    ssbi?: SSBI | null;
   };
   away?: {
     formation?: string | null;
@@ -178,6 +198,7 @@ interface SimulationMetricsResponse {
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
     gsrm?: GSRM | null;
+    ssbi?: SSBI | null;
   };
 }
 
@@ -973,6 +994,173 @@ function GameIntelligenceCard({
   );
 }
 
+function ssbiColor(val: number | null | undefined): string {
+  if (val == null) return Colors.dark.textSecondary;
+  if (val >= 7.5) return "#22c55e";
+  if (val >= 5) return "#eab308";
+  return "#ef4444";
+}
+
+function ssbiLabel(val: number | null | undefined): string {
+  if (val == null) return "—";
+  if (val >= 8.5) return "Destroyer";
+  if (val >= 7) return "Breaker";
+  if (val >= 5) return "Neutral";
+  if (val >= 3) return "Passive";
+  return "Stagnant";
+}
+
+function ScoreStateBreakCard({
+  homeTeamName,
+  awayTeamName,
+  homeSsbi,
+  awaySsbi,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeSsbi?: SSBI | null;
+  awaySsbi?: SSBI | null;
+}) {
+  if (!homeSsbi && !awaySsbi) return null;
+
+  const indices: {
+    key: string;
+    label: string;
+    desc: string;
+    homeVal: number | null;
+    awayVal: number | null;
+    homeMatches: number;
+    awayMatches: number;
+  }[] = [
+    {
+      key: "zzb",
+      label: "0–0 Break Index",
+      desc: "How quickly a team breaks the deadlock — first goal timing & frequency",
+      homeVal: homeSsbi?.zzb ?? null,
+      awayVal: awaySsbi?.zzb ?? null,
+      homeMatches: homeSsbi?.zzbMatches ?? 0,
+      awayMatches: awaySsbi?.zzbMatches ?? 0,
+    },
+    {
+      key: "lbr",
+      label: "1–0 Lead Behavior",
+      desc: "After going 1–0 up: do they push again or sit back and protect?",
+      homeVal: homeSsbi?.lbr ?? null,
+      awayVal: awaySsbi?.lbr ?? null,
+      homeMatches: homeSsbi?.lbrMatches ?? 0,
+      awayMatches: awaySsbi?.lbrMatches ?? 0,
+    },
+    {
+      key: "ddi",
+      label: "1–1 Disruption Index",
+      desc: "When the match is level at 1–1, how often does a team push for the winner?",
+      homeVal: homeSsbi?.ddi ?? null,
+      awayVal: awaySsbi?.ddi ?? null,
+      homeMatches: homeSsbi?.ddiMatches ?? 0,
+      awayMatches: awaySsbi?.ddiMatches ?? 0,
+    },
+  ];
+
+  const hasAnyData = indices.some((i) => i.homeVal != null || i.awayVal != null);
+  if (!hasAnyData) return null;
+
+  const allBreakers: Array<{ name: string; team: "home" | "away"; data: SSBIBreaker }> = [
+    ...(homeSsbi?.keyBreakers || []).map((b) => ({ name: homeTeamName, team: "home" as const, data: b })),
+    ...(awaySsbi?.keyBreakers || []).map((b) => ({ name: awayTeamName, team: "away" as const, data: b })),
+  ];
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Score State Breakability · SSBI</Text>
+      <View style={[styles.statsHeaderRow, { marginBottom: 4 }]}>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+        <Text style={styles.statsHeaderLabel}>Index /10</Text>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      </View>
+
+      {indices.map((idx) => {
+        if (idx.homeVal == null && idx.awayVal == null) return null;
+        const hColor = ssbiColor(idx.homeVal);
+        const aColor = ssbiColor(idx.awayVal);
+        const hPct = idx.homeVal != null ? (idx.homeVal / 10) * 100 : 0;
+        const aPct = idx.awayVal != null ? (idx.awayVal / 10) * 100 : 0;
+        return (
+          <View key={idx.key} style={styles.gsrmRow}>
+            <View style={styles.gsrmSide}>
+              <Text style={[styles.gsrmScore, { color: hColor }]}>
+                {idx.homeVal != null ? idx.homeVal.toFixed(1) : "—"}
+              </Text>
+              <Text style={[styles.gsrmTag, { color: hColor }]}>
+                {ssbiLabel(idx.homeVal)}
+              </Text>
+            </View>
+            <View style={styles.gsrmCenter}>
+              <Text style={styles.gsrmLabel}>{idx.label}</Text>
+              <Text style={styles.gsrmDesc}>{idx.desc}</Text>
+              <View style={styles.gsrmBarRow}>
+                <View style={styles.gsrmBarTrack}>
+                  <View style={[styles.gsrmBarFillHome, { width: `${Math.max(hPct, 4)}%`, backgroundColor: hColor }]} />
+                </View>
+                <View style={styles.gsrmBarTrack}>
+                  <View style={[styles.gsrmBarFillAway, { width: `${Math.max(aPct, 4)}%`, backgroundColor: aColor }]} />
+                </View>
+              </View>
+              <Text style={styles.gsrmMatchCount}>
+                {idx.homeMatches > 0 ? `${idx.homeMatches} matches` : "no data"} · {idx.awayMatches > 0 ? `${idx.awayMatches} matches` : "no data"}
+              </Text>
+            </View>
+            <View style={styles.gsrmSideRight}>
+              <Text style={[styles.gsrmScore, { color: aColor, textAlign: "right" }]}>
+                {idx.awayVal != null ? idx.awayVal.toFixed(1) : "—"}
+              </Text>
+              <Text style={[styles.gsrmTag, { color: aColor, textAlign: "right" }]}>
+                {ssbiLabel(idx.awayVal)}
+              </Text>
+            </View>
+          </View>
+        );
+      })}
+
+      {allBreakers.length > 0 && (
+        <View style={styles.ssbiBreakersSection}>
+          <Text style={styles.ssbiBreakerTitle}>Key State Breakers</Text>
+          <Text style={styles.ssbiBreakerSub}>Players who score in 0–0 / 1–1 situations · last 15 matches</Text>
+          {allBreakers.map((item) => {
+            const teamColor = item.team === "home" ? Colors.dark.homeKit : Colors.dark.awayKit;
+            const avail = item.data.available;
+            return (
+              <View key={`${item.team}-${item.data.playerId}`} style={styles.ssbiBreakerRow}>
+                <View style={[styles.ssbiBreakerDot, { backgroundColor: teamColor }]} />
+                <View style={{ flex: 1 }}>
+                  <View style={styles.ssbiBreakerHeader}>
+                    <Text style={[styles.ssbiBreakerName, { color: teamColor }]} numberOfLines={1}>
+                      {item.data.name}
+                    </Text>
+                    {avail !== null && (
+                      <View style={[styles.ssbiAvailBadge, { backgroundColor: avail ? "#16a34a33" : "#7f1d1d33" }]}>
+                        <Text style={[styles.ssbiAvailText, { color: avail ? "#4ade80" : "#f87171" }]}>
+                          {avail ? "Available" : "Doubtful"}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.ssbiBreakerStats}>
+                    {item.data.zzbGoals > 0 ? `${item.data.zzbGoals}× deadlock` : ""}
+                    {item.data.zzbGoals > 0 && item.data.ddiGoals > 0 ? "  ·  " : ""}
+                    {item.data.ddiGoals > 0 ? `${item.data.ddiGoals}× 1–1 break` : ""}
+                    {"  "}
+                    <Text style={styles.ssbiBreakerTotal}>({item.data.total} state-breaking goals)</Text>
+                  </Text>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
@@ -1248,6 +1436,13 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homeGsrm={simulationMetrics?.home?.gsrm}
         awayGsrm={simulationMetrics?.away?.gsrm}
+      />
+
+      <ScoreStateBreakCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeSsbi={simulationMetrics?.home?.ssbi}
+        awaySsbi={simulationMetrics?.away?.ssbi}
       />
 
       <TeamStatsCard
@@ -1949,5 +2144,65 @@ const styles = StyleSheet.create({
     color: Colors.dark.textTertiary,
     textAlign: "center",
     marginTop: 2,
+  },
+  ssbiBreakersSection: {
+    marginTop: 14,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.dark.border,
+  },
+  ssbiBreakerTitle: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    marginBottom: 2,
+  },
+  ssbiBreakerSub: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginBottom: 8,
+  },
+  ssbiBreakerRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    marginBottom: 8,
+  },
+  ssbiBreakerDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginTop: 5,
+  },
+  ssbiBreakerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 2,
+  },
+  ssbiBreakerName: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    flex: 1,
+  },
+  ssbiAvailBadge: {
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  ssbiAvailText: {
+    fontSize: 9,
+    fontFamily: "Inter_600SemiBold",
+  },
+  ssbiBreakerStats: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+  },
+  ssbiBreakerTotal: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
   },
 });

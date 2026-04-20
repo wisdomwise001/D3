@@ -63,6 +63,25 @@ function calculateCustomXG(
 
 type GoalState = { time: number; homeScore: number; awayScore: number };
 
+type SSBIBreaker = {
+  playerId: number;
+  name: string;
+  zzbGoals: number;
+  ddiGoals: number;
+  total: number;
+  available: boolean | null;
+};
+
+type SSBI = {
+  zzb: number | null;
+  zzbMatches: number;
+  lbr: number | null;
+  lbrMatches: number;
+  ddi: number | null;
+  ddiMatches: number;
+  keyBreakers: SSBIBreaker[];
+};
+
 type GSRM = {
   ecri: number | null;
   eri: number | null;
@@ -191,6 +210,167 @@ function computeGSRM(events: any[], teamId: number, incidentsByEventId: Map<numb
     eriMatches: eriCount,
     tgbiMatches: tgbiCount,
     frqiMatches: frqiCount,
+  };
+}
+
+function computeSSBI(
+  events: any[],
+  teamId: number,
+  incidentsByEventId: Map<number, any>,
+  missingPlayerIds: Set<number>,
+): SSBI {
+  let zzbScore = 0, zzbCount = 0;
+  let lbrScore = 0, lbrCount = 0;
+  let ddiScore = 0, ddiCount = 0;
+
+  const breakerMap = new Map<number, { name: string; zzbGoals: number; ddiGoals: number }>();
+
+  for (const event of events) {
+    const isHome = event.homeTeam?.id === teamId;
+    const isAway = event.awayTeam?.id === teamId;
+    if (!isHome && !isAway) continue;
+
+    const incData = incidentsByEventId.get(event.id);
+    if (!incData) continue;
+
+    const incidents: any[] = incData?.incidents || [];
+
+    type GoalEntry = {
+      time: number;
+      homeScore: number;
+      awayScore: number;
+      teamScored: boolean;
+      scorerId?: number;
+      scorerName?: string;
+    };
+
+    const goals: GoalEntry[] = [];
+    let prevH = 0, prevA = 0;
+
+    const sortedInc = [...incidents].sort((a, b) => (Number(a.time) || 0) - (Number(b.time) || 0));
+
+    for (const inc of sortedInc) {
+      const type = (inc.incidentType || inc.type || "").toLowerCase();
+      if (type !== "goal" && type !== "penalty") continue;
+      const h = Number(inc.homeScore);
+      const a = Number(inc.awayScore);
+      const t = Number(inc.time) || 0;
+      if (!Number.isFinite(h) || !Number.isFinite(a)) continue;
+
+      const homeScored = h > prevH;
+      const awayScored = a > prevA;
+      let teamScored = false;
+      if (homeScored && isHome) teamScored = true;
+      else if (awayScored && isAway) teamScored = true;
+      else if (!homeScored && !awayScored && inc.isHome !== undefined) {
+        teamScored = isHome ? !!inc.isHome : !inc.isHome;
+      }
+
+      goals.push({
+        time: t,
+        homeScore: h,
+        awayScore: a,
+        teamScored,
+        scorerId: inc.player?.id ? Number(inc.player.id) : undefined,
+        scorerName: inc.player?.shortName || inc.player?.name || undefined,
+      });
+      prevH = h;
+      prevA = a;
+    }
+
+    const tS = (g: GoalEntry) => isHome ? g.homeScore : g.awayScore;
+    const oS = (g: GoalEntry) => isHome ? g.awayScore : g.homeScore;
+
+    // ── 0-0 Break Index ───────────────────────────────────────────────────
+    zzbCount++;
+    if (goals.length === 0) {
+      zzbScore += 1;
+    } else {
+      const firstGoal = goals[0];
+      if (firstGoal.teamScored) {
+        const t = firstGoal.time;
+        const score = t <= 20 ? 10 : t <= 35 ? 8.5 : t <= 60 ? 6 : t <= 80 ? 4 : 3;
+        zzbScore += score;
+        if (firstGoal.scorerId) {
+          const b = breakerMap.get(firstGoal.scorerId) || { name: firstGoal.scorerName || "Unknown", zzbGoals: 0, ddiGoals: 0 };
+          b.zzbGoals++;
+          breakerMap.set(firstGoal.scorerId, b);
+        }
+      } else {
+        zzbScore += 2;
+      }
+    }
+
+    // ── 1-0 Lead Break Response ───────────────────────────────────────────
+    for (let i = 0; i < goals.length; i++) {
+      const g = goals[i];
+      if (g.teamScored && tS(g) === 1 && oS(g) === 0) {
+        lbrCount++;
+        const after = goals.slice(i + 1);
+        const teamAfter = after.filter((g2) => g2.teamScored);
+        const oppAfter = after.filter((g2) => !g2.teamScored);
+        if (teamAfter.length > 0) {
+          const diff = teamAfter[0].time - g.time;
+          lbrScore += diff <= 15 ? 10 : diff <= 30 ? 8 : 6;
+        } else if (oppAfter.length === 0) {
+          lbrScore += 7;
+        } else {
+          const diff = oppAfter[0].time - g.time;
+          lbrScore += diff <= 15 ? 2 : 4;
+        }
+        break;
+      }
+    }
+
+    // ── 1-1 Draw Disruption Index ─────────────────────────────────────────
+    for (let i = 0; i < goals.length; i++) {
+      const g = goals[i];
+      if (tS(g) === 1 && oS(g) === 1) {
+        ddiCount++;
+        const after = goals.slice(i + 1);
+        const teamAfter = after.filter((g2) => g2.teamScored);
+        const oppAfter = after.filter((g2) => !g2.teamScored);
+        if (teamAfter.length > 0) {
+          const diff = teamAfter[0].time - g.time;
+          ddiScore += diff <= 15 ? 10 : diff <= 30 ? 9 : 7;
+          if (teamAfter[0].scorerId) {
+            const b = breakerMap.get(teamAfter[0].scorerId) || { name: teamAfter[0].scorerName || "Unknown", zzbGoals: 0, ddiGoals: 0 };
+            b.ddiGoals++;
+            breakerMap.set(teamAfter[0].scorerId, b);
+          }
+        } else if (oppAfter.length > 0) {
+          ddiScore += 2;
+        } else {
+          ddiScore += 3;
+        }
+        break;
+      }
+    }
+  }
+
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+
+  const keyBreakers: SSBIBreaker[] = Array.from(breakerMap.entries())
+    .map(([playerId, data]) => ({
+      playerId,
+      name: data.name,
+      zzbGoals: data.zzbGoals,
+      ddiGoals: data.ddiGoals,
+      total: data.zzbGoals + data.ddiGoals,
+      available: missingPlayerIds.size > 0 ? !missingPlayerIds.has(playerId) : null,
+    }))
+    .filter((b) => b.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
+
+  return {
+    zzb: zzbCount > 0 ? r1(zzbScore / zzbCount) : null,
+    zzbMatches: zzbCount,
+    lbr: lbrCount > 0 ? r1(lbrScore / lbrCount) : null,
+    lbrMatches: lbrCount,
+    ddi: ddiCount > 0 ? r1(ddiScore / ddiCount) : null,
+    ddiMatches: ddiCount,
+    keyBreakers,
   };
 }
 
@@ -1671,12 +1851,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const homeGSRM = computeGSRM(homeLast15, homeTeamId, incidentsByEventId);
         const awayGSRM = computeGSRM(awayLast15, awayTeamId, incidentsByEventId);
 
+        const homeMissingIds = new Set<number>(
+          (currentLineups?.home?.missingPlayers || [])
+            .map((entry: any) => Number(entry.player?.id))
+            .filter(Boolean),
+        );
+        const awayMissingIds = new Set<number>(
+          (currentLineups?.away?.missingPlayers || [])
+            .map((entry: any) => Number(entry.player?.id))
+            .filter(Boolean),
+        );
+        const homeSSBI = computeSSBI(homeLast15, homeTeamId, incidentsByEventId, homeMissingIds);
+        const awaySSBI = computeSSBI(awayLast15, awayTeamId, incidentsByEventId, awayMissingIds);
+
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
         res.json({
-          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM },
-          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM },
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI },
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });
