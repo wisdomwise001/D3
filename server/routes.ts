@@ -101,9 +101,54 @@ type ScoringBucket = {
   concededPct: number;
 };
 
+type MatchNarrative =
+  | "unluckyLoss"
+  | "wastedDominance"
+  | "luckyWin"
+  | "smashAndGrab"
+  | "dominantWin"
+  | "exploitedWeakDef"
+  | "outclassed"
+  | "comeback"
+  | "blewLead"
+  | "openTradeoff"
+  | "lateShow"
+  | "fastStart"
+  | "deadlock";
+
+type MatchStory = {
+  eventId: number;
+  date: number;
+  opponent: string;
+  venue: "H" | "A";
+  result: "W" | "D" | "L";
+  goalsFor: number;
+  goalsAgainst: number;
+  xgFor: number | null;
+  xgAgainst: number | null;
+  shots: number | null;
+  shotsOnTarget: number | null;
+  bigChances: number | null;
+  bigChancesMissed: number | null;
+  possession: number | null;
+  firstGoalMin: number | null;
+  firstConcMin: number | null;
+  narratives: MatchNarrative[];
+  oneLine: string;
+};
+
+type RecurringPattern = {
+  key: MatchNarrative | "always_score_first" | "always_concede_first" | "always_late_show" | "always_fast_start" | "xg_overperformer_streak" | "xg_underperformer_streak" | "comeback_kings" | "frontrunner_chokers";
+  label: string;
+  count: number;
+  total: number;
+  evidence: string;
+};
+
 type ScoringPatterns = {
   matchesAnalyzed: number;
   matchesWithIncidents: number;
+  matchesWithStats: number;
   totalScored: number;
   totalConceded: number;
   avgScored: number | null;
@@ -126,9 +171,23 @@ type ScoringPatterns = {
   comebackRate: number | null;
   blownLeadRate: number | null;
   xgPerMatch: number | null;
+  xgAgainstPerMatch: number | null;
   xgDelta: number | null;
+  defensiveXgDelta: number | null;
+  shotsPerMatch: number | null;
+  bigChancesPerMatch: number | null;
+  bigChancesMissedPerMatch: number | null;
   finishingTag: "Deadly" | "Clinical" | "Reliable" | "Wasteful" | "Flop" | null;
+  defensiveTag: "Resolute" | "Solid" | "Average" | "Leaky" | "Sieve" | null;
   styleTags: string[];
+  recurringPatterns: RecurringPattern[];
+  matchStories: MatchStory[];
+  exploitProfile: {
+    avgGoalsVsLeakyOpp: number | null;
+    matchesVsLeakyOpp: number;
+    avgGoalsVsResoluteOpp: number | null;
+    matchesVsResoluteOpp: number;
+  };
 };
 
 const PATTERN_BUCKETS: { label: string; from: number; to: number }[] = [
@@ -148,10 +207,155 @@ function bucketFor(time: number): number {
   return Math.max(0, PATTERN_BUCKETS.length - 1);
 }
 
+function readMatchStat(statsData: any, side: "home" | "away", names: string[]): number | null {
+  const periodData = (statsData?.statistics || []).find((p: any) => p.period === "ALL");
+  if (!periodData) return null;
+  for (const group of (periodData.groups || [])) {
+    for (const item of (group.statisticsItems || [])) {
+      const n = (item.name || "").toLowerCase().trim();
+      if (names.includes(n)) {
+        const raw = side === "home" ? item.home : item.away;
+        if (raw === null || raw === undefined || raw === "") continue;
+        const str = String(raw).trim();
+        const slash = str.indexOf("/");
+        const num = slash > 0
+          ? parseFloat(str.slice(0, slash).replace(/[^0-9.]/g, ""))
+          : parseFloat(str.replace(/[^0-9.\-]/g, ""));
+        if (Number.isFinite(num)) return num;
+      }
+    }
+  }
+  return null;
+}
+
+function buildMatchStory(
+  event: any,
+  teamId: number,
+  incData: any,
+  statsData: any,
+): MatchStory | null {
+  const isHome = event.homeTeam?.id === teamId;
+  const isAway = event.awayTeam?.id === teamId;
+  if (!isHome && !isAway) return null;
+
+  const side: "home" | "away" = isHome ? "home" : "away";
+  const oppSide: "home" | "away" = isHome ? "away" : "home";
+  const opponent = isHome ? (event.awayTeam?.shortName || event.awayTeam?.name || "Opp") : (event.homeTeam?.shortName || event.homeTeam?.name || "Opp");
+
+  const goals = incData ? parseGoalTimeline(incData) : [];
+  const finalState = goals.length > 0
+    ? goals[goals.length - 1]
+    : {
+        time: 0,
+        homeScore: Number(event.homeScore?.current ?? event.homeScore?.normaltime ?? 0) || 0,
+        awayScore: Number(event.awayScore?.current ?? event.awayScore?.normaltime ?? 0) || 0,
+      };
+  const goalsFor = isHome ? finalState.homeScore : finalState.awayScore;
+  const goalsAgainst = isHome ? finalState.awayScore : finalState.homeScore;
+  const result: "W" | "D" | "L" = goalsFor > goalsAgainst ? "W" : goalsFor < goalsAgainst ? "L" : "D";
+
+  const xgFor = readMatchStat(statsData, side, ["expected goals", "xg"]);
+  const xgAgainst = readMatchStat(statsData, oppSide, ["expected goals", "xg"]);
+  const shots = readMatchStat(statsData, side, ["total shots", "shots"]);
+  const shotsOnTarget = readMatchStat(statsData, side, ["shots on target"]);
+  const bigChances = readMatchStat(statsData, side, ["big chances"]);
+  const bigChancesMissed = readMatchStat(statsData, side, ["big chances missed"]);
+  const possession = readMatchStat(statsData, side, ["ball possession"]);
+
+  let firstGoalMin: number | null = null;
+  let firstConcMin: number | null = null;
+  let everBehind = false, everLed = false;
+  let prev = { time: 0, homeScore: 0, awayScore: 0 };
+  for (const g of goals) {
+    const tF = isHome ? g.homeScore : g.awayScore;
+    const oF = isHome ? g.awayScore : g.homeScore;
+    const tP = isHome ? prev.homeScore : prev.awayScore;
+    const oP = isHome ? prev.awayScore : prev.homeScore;
+    if (tF > tP && firstGoalMin === null) firstGoalMin = g.time;
+    if (oF > oP && firstConcMin === null) firstConcMin = g.time;
+    if (oF > tF) everBehind = true;
+    if (tF > oF) everLed = true;
+    prev = g;
+  }
+
+  const narratives: MatchNarrative[] = [];
+  if (xgFor != null) {
+    if (result === "L" && xgFor - goalsFor >= 0.7 && xgFor >= 1.4) narratives.push("unluckyLoss");
+    if (result === "W" && goalsFor - xgFor >= 0.7) narratives.push("luckyWin");
+  }
+  if ((shots != null && shots >= 14) || (bigChances != null && bigChances >= 3)) {
+    if ((result === "L" || result === "D") && goalsFor <= 1) narratives.push("wastedDominance");
+  }
+  if (result === "W" && xgFor != null && xgFor < 1.0 && goalsAgainst <= 1) narratives.push("smashAndGrab");
+  if (result === "W" && (possession ?? 0) >= 58 && (shots ?? 0) >= 13 && goalsFor - goalsAgainst >= 2) narratives.push("dominantWin");
+  if (result === "W" && goalsFor - goalsAgainst >= 3) narratives.push("exploitedWeakDef");
+  if (result === "L" && goalsAgainst - goalsFor >= 2 && (possession ?? 50) <= 42) narratives.push("outclassed");
+  if (everBehind && (result === "W" || result === "D")) narratives.push("comeback");
+  if (everLed && result !== "W") narratives.push("blewLead");
+  if (goalsFor + goalsAgainst >= 4) narratives.push("openTradeoff");
+  if (firstGoalMin != null && firstGoalMin >= 70 && goalsFor > 0) narratives.push("lateShow");
+  if (firstGoalMin != null && firstGoalMin <= 15 && goalsFor > 0) narratives.push("fastStart");
+  if (goalsFor === 0 && goalsAgainst === 0) narratives.push("deadlock");
+
+  let oneLine = `${venueChar(side)} vs ${opponent} · ${goalsFor}-${goalsAgainst} ${result}`;
+  if (xgFor != null && xgAgainst != null) {
+    oneLine += ` · xG ${xgFor.toFixed(1)}-${xgAgainst.toFixed(1)}`;
+  }
+  if (narratives.length > 0) {
+    const top = narratives.slice(0, 2).map(narrativeLabel).join(", ");
+    oneLine += ` — ${top}`;
+  }
+
+  return {
+    eventId: event.id,
+    date: Number(event.startTimestamp) || 0,
+    opponent,
+    venue: isHome ? "H" : "A",
+    result,
+    goalsFor,
+    goalsAgainst,
+    xgFor,
+    xgAgainst,
+    shots,
+    shotsOnTarget,
+    bigChances,
+    bigChancesMissed,
+    possession,
+    firstGoalMin,
+    firstConcMin,
+    narratives,
+    oneLine,
+  };
+}
+
+function venueChar(side: "home" | "away"): string {
+  return side === "home" ? "H" : "A";
+}
+
+function narrativeLabel(n: MatchNarrative): string {
+  const map: Record<MatchNarrative, string> = {
+    unluckyLoss: "unlucky loss",
+    wastedDominance: "wasted dominance",
+    luckyWin: "lucky win",
+    smashAndGrab: "smash & grab",
+    dominantWin: "dominant win",
+    exploitedWeakDef: "exploited weak defence",
+    outclassed: "outclassed",
+    comeback: "comeback",
+    blewLead: "blew lead",
+    openTradeoff: "open trade-off",
+    lateShow: "late show",
+    fastStart: "fast start",
+    deadlock: "deadlock",
+  };
+  return map[n];
+}
+
 function computeScoringPatterns(
   events: any[],
   teamId: number,
   incidentsByEventId: Map<number, any>,
+  statsByEventId: Map<number, any>,
   avgXgScored: number | null,
 ): ScoringPatterns {
   const buckets = PATTERN_BUCKETS.map((b) => ({
@@ -305,9 +509,177 @@ function computeScoringPatterns(
   if (bttsRt  != null && bttsRt  >= 65) styleTags.push(`BTTS in ${bttsRt}% — open games`);
   if (o25Rt   != null && o25Rt   >= 65) styleTags.push(`Over 2.5 in ${o25Rt}% — high-scoring style`);
 
+  // ── Per-match stories ─────────────────────────────────────────────────
+  const matchStories: MatchStory[] = [];
+  let xgForSum = 0, xgForCount = 0;
+  let xgAgainstSum = 0, xgAgainstCount = 0;
+  let shotsSum = 0, shotsCount = 0;
+  let bcSum = 0, bcCount = 0;
+  let bcMissedSum = 0, bcMissedCount = 0;
+  let goalsVsLeakySum = 0, vsLeakyCount = 0;
+  let goalsVsResoluteSum = 0, vsResoluteCount = 0;
+
+  for (const event of events) {
+    const incData = incidentsByEventId.get(event.id);
+    const statsData = statsByEventId.get(event.id);
+    const story = buildMatchStory(event, teamId, incData, statsData);
+    if (!story) continue;
+    matchStories.push(story);
+
+    if (story.xgFor != null)            { xgForSum += story.xgFor; xgForCount++; }
+    if (story.xgAgainst != null)        { xgAgainstSum += story.xgAgainst; xgAgainstCount++; }
+    if (story.shots != null)            { shotsSum += story.shots; shotsCount++; }
+    if (story.bigChances != null)       { bcSum += story.bigChances; bcCount++; }
+    if (story.bigChancesMissed != null) { bcMissedSum += story.bigChancesMissed; bcMissedCount++; }
+
+    // Opponent leakiness proxy: opponent xG conceded in this match (= our xgFor) high → opp's defence porous
+    if (story.xgFor != null) {
+      if (story.xgFor >= 1.7 || story.goalsAgainst >= 0) {
+        // Use our created xG as proxy for opponent leakiness when high
+        if (story.xgFor >= 1.6) {
+          goalsVsLeakySum += story.goalsFor;
+          vsLeakyCount++;
+        } else if (story.xgFor <= 0.9) {
+          goalsVsResoluteSum += story.goalsFor;
+          vsResoluteCount++;
+        }
+      }
+    }
+  }
+  matchStories.sort((a, b) => b.date - a.date);
+
+  const matchesWithStats = matchStories.filter(s => s.xgFor != null).length;
+  const xgPerMatch = xgForCount > 0 ? r1(xgForSum / xgForCount) : (avgXgScored != null ? r1(avgXgScored) : null);
+  const xgAgainstPerMatch = xgAgainstCount > 0 ? r1(xgAgainstSum / xgAgainstCount) : null;
+  const xgDelta2 = (avgScored != null && xgPerMatch != null) ? r1(avgScored - xgPerMatch) : xgDelta;
+  const defensiveXgDelta = (avgConceded != null && xgAgainstPerMatch != null) ? r1(xgAgainstPerMatch - avgConceded) : null;
+  const shotsPerMatch = shotsCount > 0 ? r1(shotsSum / shotsCount) : null;
+  const bigChancesPerMatch = bcCount > 0 ? r1(bcSum / bcCount) : null;
+  const bigChancesMissedPerMatch = bcMissedCount > 0 ? r1(bcMissedSum / bcMissedCount) : null;
+
+  let defensiveTag: ScoringPatterns["defensiveTag"] = null;
+  if (defensiveXgDelta != null && avgConceded != null) {
+    if (avgConceded <= 0.7 && defensiveXgDelta >= 0)      defensiveTag = "Resolute";
+    else if (avgConceded <= 1.1)                          defensiveTag = "Solid";
+    else if (avgConceded <= 1.5)                          defensiveTag = "Average";
+    else if (avgConceded <= 2.0)                          defensiveTag = "Leaky";
+    else                                                  defensiveTag = "Sieve";
+  }
+
+  // ── Recurring narrative patterns ──────────────────────────────────────
+  const narrCounts = new Map<MatchNarrative, number>();
+  matchStories.forEach(s => s.narratives.forEach(n => narrCounts.set(n, (narrCounts.get(n) || 0) + 1)));
+
+  const recurring: RecurringPattern[] = [];
+  const recurringLabels: Partial<Record<MatchNarrative, string>> = {
+    unluckyLoss:     "Unlucky losses — high xG, no return",
+    wastedDominance: "Wasted dominance — lots of shots, few goals",
+    luckyWin:        "Lucky wins — overperforming xG",
+    smashAndGrab:    "Smash-&-grab wins on low xG",
+    dominantWin:     "Dominant wins — possession + finishing",
+    exploitedWeakDef:"Devastating vs weak defences",
+    outclassed:      "Outclassed performances",
+    comeback:        "Comeback merchants",
+    blewLead:        "Blown leads",
+    openTradeoff:    "Open, high-scoring trade-offs",
+    lateShow:        "Late shows — winner after 70′",
+    fastStart:       "Fast starters — score in opening 15′",
+    deadlock:        "Goalless deadlocks",
+  };
+  const N = matchStories.length;
+  narrCounts.forEach((count, key) => {
+    if (count < 2) return;
+    const label = recurringLabels[key] || narrativeLabel(key);
+    recurring.push({
+      key,
+      label,
+      count,
+      total: N,
+      evidence: `${count}/${N} matches`,
+    });
+  });
+  recurring.sort((a, b) => b.count - a.count);
+
+  // Streak detections
+  const recent = matchStories.slice(0, Math.min(5, matchStories.length));
+  const recentUnlucky = recent.filter(s => s.narratives.includes("unluckyLoss") || s.narratives.includes("wastedDominance")).length;
+  if (recentUnlucky >= 2) {
+    recurring.unshift({
+      key: "xg_underperformer_streak",
+      label: `Hot streak of bad luck — ${recentUnlucky}/${recent.length} recent matches`,
+      count: recentUnlucky,
+      total: recent.length,
+      evidence: "Created lots, finished few — primed for a regression-to-mean explosion",
+    });
+  }
+  const recentLucky = recent.filter(s => s.narratives.includes("luckyWin") || s.narratives.includes("smashAndGrab")).length;
+  if (recentLucky >= 2) {
+    recurring.unshift({
+      key: "xg_overperformer_streak",
+      label: `Riding their luck — ${recentLucky}/${recent.length} recent overperformances`,
+      count: recentLucky,
+      total: recent.length,
+      evidence: "Winning above the underlying numbers — vulnerable to a correction",
+    });
+  }
+  const comebackCount = narrCounts.get("comeback") || 0;
+  if (comebackCount >= 3) {
+    recurring.unshift({
+      key: "comeback_kings",
+      label: `Comeback kings — ${comebackCount}/${N} matches rescued from behind`,
+      count: comebackCount, total: N,
+      evidence: "Don't write them off when conceding first",
+    });
+  }
+  const blewCount = narrCounts.get("blewLead") || 0;
+  if (blewCount >= 3) {
+    recurring.unshift({
+      key: "frontrunner_chokers",
+      label: `Front-runner chokers — ${blewCount}/${N} leads dropped`,
+      count: blewCount, total: N,
+      evidence: "Cannot kill games when ahead",
+    });
+  }
+  if (sFirst != null && sFirst >= 70) {
+    recurring.unshift({
+      key: "always_score_first", label: `Always score first — ${sFirst.toFixed(0)}% of matches`,
+      count: scoredFirst, total: matchesAnalyzed, evidence: "Front-foot starters by default",
+    });
+  }
+  if (cFirst != null && cFirst >= 65) {
+    recurring.unshift({
+      key: "always_concede_first", label: `Always concede first — ${cFirst.toFixed(0)}% of matches`,
+      count: concededFirst, total: matchesAnalyzed, evidence: "Slow into matches, chasing games often",
+    });
+  }
+  const fastStartCount = narrCounts.get("fastStart") || 0;
+  if (fastStartCount >= 4) {
+    recurring.unshift({ key: "always_fast_start", label: `Fast-start habit — ${fastStartCount}/${N} matches with 0–15′ goals`, count: fastStartCount, total: N, evidence: "Set the tempo immediately" });
+  }
+  const lateShowCount = narrCounts.get("lateShow") || 0;
+  if (lateShowCount >= 3) {
+    recurring.unshift({ key: "always_late_show", label: `Late-show habit — ${lateShowCount}/${N} matches decided after 70′`, count: lateShowCount, total: N, evidence: "Nervy until the final whistle" });
+  }
+
+  // Exploit profile narrative additions
+  if (vsLeakyCount >= 2) {
+    const avg = r1(goalsVsLeakySum / vsLeakyCount);
+    if (avg >= 2.0) styleTags.push(`Devastating vs leaky opponents — ${avg} goals/match in ${vsLeakyCount} such fixtures`);
+  }
+  if (vsResoluteCount >= 2) {
+    const avg = r1(goalsVsResoluteSum / vsResoluteCount);
+    if (avg <= 0.5) styleTags.push(`Stifled by tight defences — only ${avg} goals/match in ${vsResoluteCount} such fixtures`);
+  }
+  if (bigChancesMissedPerMatch != null && bigChancesMissedPerMatch >= 1.5) {
+    styleTags.push(`Wasteful in front of goal — ${bigChancesMissedPerMatch} big chances missed/match`);
+  }
+  if (defensiveTag === "Resolute") styleTags.push(`Resolute back-line — concede only ${avgConceded}/match`);
+  if (defensiveTag === "Sieve")    styleTags.push(`Sieve at the back — ${avgConceded} conceded/match`);
+
   return {
     matchesAnalyzed,
     matchesWithIncidents,
+    matchesWithStats,
     totalScored,
     totalConceded,
     avgScored,
@@ -329,10 +701,24 @@ function computeScoringPatterns(
     over25Rate: o25Rt,
     comebackRate:  pct(comebacks, concededFirst),
     blownLeadRate: pct(blownLeads, scoredFirst),
-    xgPerMatch: avgXgScored != null ? r1(avgXgScored) : null,
-    xgDelta,
+    xgPerMatch,
+    xgAgainstPerMatch,
+    xgDelta: xgDelta2,
+    defensiveXgDelta,
+    shotsPerMatch,
+    bigChancesPerMatch,
+    bigChancesMissedPerMatch,
     finishingTag,
+    defensiveTag,
     styleTags,
+    recurringPatterns: recurring,
+    matchStories,
+    exploitProfile: {
+      avgGoalsVsLeakyOpp:    vsLeakyCount    > 0 ? r1(goalsVsLeakySum / vsLeakyCount)       : null,
+      matchesVsLeakyOpp:     vsLeakyCount,
+      avgGoalsVsResoluteOpp: vsResoluteCount > 0 ? r1(goalsVsResoluteSum / vsResoluteCount) : null,
+      matchesVsResoluteOpp:  vsResoluteCount,
+    },
   };
 }
 
@@ -2107,8 +2493,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const homeSSBI = computeSSBI(homeLast15, homeTeamId, incidentsByEventId, homeMissingIds);
         const awaySSBI = computeSSBI(awayLast15, awayTeamId, incidentsByEventId, awayMissingIds);
 
-        const homePatterns = computeScoringPatterns(homeLast15, homeTeamId, incidentsByEventId, homeTeamMatchStats?.all?.avgXg ?? null);
-        const awayPatterns = computeScoringPatterns(awayLast15, awayTeamId, incidentsByEventId, awayTeamMatchStats?.all?.avgXg ?? null);
+        const homePatterns = computeScoringPatterns(homeLast15, homeTeamId, incidentsByEventId, statsByEventId, homeTeamMatchStats?.all?.avgXg ?? null);
+        const awayPatterns = computeScoringPatterns(awayLast15, awayTeamId, incidentsByEventId, statsByEventId, awayTeamMatchStats?.all?.avgXg ?? null);
 
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);

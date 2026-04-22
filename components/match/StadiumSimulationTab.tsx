@@ -122,9 +122,44 @@ interface ScoringBucket {
   concededPct: number;
 }
 
+type MatchNarrative =
+  | "unluckyLoss" | "wastedDominance" | "luckyWin" | "smashAndGrab"
+  | "dominantWin" | "exploitedWeakDef" | "outclassed" | "comeback"
+  | "blewLead" | "openTradeoff" | "lateShow" | "fastStart" | "deadlock";
+
+interface MatchStory {
+  eventId: number;
+  date: number;
+  opponent: string;
+  venue: "H" | "A";
+  result: "W" | "D" | "L";
+  goalsFor: number;
+  goalsAgainst: number;
+  xgFor: number | null;
+  xgAgainst: number | null;
+  shots: number | null;
+  shotsOnTarget: number | null;
+  bigChances: number | null;
+  bigChancesMissed: number | null;
+  possession: number | null;
+  firstGoalMin: number | null;
+  firstConcMin: number | null;
+  narratives: MatchNarrative[];
+  oneLine: string;
+}
+
+interface RecurringPattern {
+  key: string;
+  label: string;
+  count: number;
+  total: number;
+  evidence: string;
+}
+
 interface ScoringPatterns {
   matchesAnalyzed: number;
   matchesWithIncidents: number;
+  matchesWithStats: number;
   totalScored: number;
   totalConceded: number;
   avgScored: number | null;
@@ -147,9 +182,23 @@ interface ScoringPatterns {
   comebackRate: number | null;
   blownLeadRate: number | null;
   xgPerMatch: number | null;
+  xgAgainstPerMatch: number | null;
   xgDelta: number | null;
+  defensiveXgDelta: number | null;
+  shotsPerMatch: number | null;
+  bigChancesPerMatch: number | null;
+  bigChancesMissedPerMatch: number | null;
   finishingTag: "Deadly" | "Clinical" | "Reliable" | "Wasteful" | "Flop" | null;
+  defensiveTag: "Resolute" | "Solid" | "Average" | "Leaky" | "Sieve" | null;
   styleTags: string[];
+  recurringPatterns: RecurringPattern[];
+  matchStories: MatchStory[];
+  exploitProfile: {
+    avgGoalsVsLeakyOpp: number | null;
+    matchesVsLeakyOpp: number;
+    avgGoalsVsResoluteOpp: number | null;
+    matchesVsResoluteOpp: number;
+  };
 }
 
 interface PeriodStats {
@@ -1212,6 +1261,17 @@ function finishingTagColor(tag: ScoringPatterns["finishingTag"]): string {
   }
 }
 
+function defensiveTagColor(tag: ScoringPatterns["defensiveTag"]): string {
+  switch (tag) {
+    case "Resolute": return "#22c55e";
+    case "Solid":    return "#4ade80";
+    case "Average":  return "#eab308";
+    case "Leaky":    return "#f97316";
+    case "Sieve":    return "#ef4444";
+    default:         return Colors.dark.textSecondary;
+  }
+}
+
 function PatternHeatRow({
   bucket,
   side,
@@ -1279,6 +1339,11 @@ function PatternSideBlock({
             <Text style={[styles.patternTagText, { color: tagColor }]}>{patterns.finishingTag}</Text>
           </View>
         )}
+        {patterns.defensiveTag && (
+          <View style={[styles.patternTagBadge, { borderColor: defensiveTagColor(patterns.defensiveTag) }]}>
+            <Text style={[styles.patternTagText, { color: defensiveTagColor(patterns.defensiveTag) }]}>{patterns.defensiveTag} D</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.patternMetricsRow}>
@@ -1299,6 +1364,20 @@ function PatternSideBlock({
             {patterns.xgDelta != null ? `${patterns.xgDelta > 0 ? "+" : ""}${patterns.xgDelta.toFixed(2)}` : "—"}
           </Text>
           <Text style={styles.patternMetricLabel}>vs xG</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={styles.patternMetricVal}>{patterns.xgAgainstPerMatch != null ? patterns.xgAgainstPerMatch.toFixed(2) : "—"}</Text>
+          <Text style={styles.patternMetricLabel}>xGA/match</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={styles.patternMetricVal}>{patterns.bigChancesPerMatch != null ? patterns.bigChancesPerMatch.toFixed(1) : "—"}</Text>
+          <Text style={styles.patternMetricLabel}>Big chances</Text>
+        </View>
+        <View style={styles.patternMetricCell}>
+          <Text style={[styles.patternMetricVal, { color: (patterns.bigChancesMissedPerMatch ?? 0) >= 1.5 ? "#f97316" : Colors.dark.text }]}>
+            {patterns.bigChancesMissedPerMatch != null ? patterns.bigChancesMissedPerMatch.toFixed(1) : "—"}
+          </Text>
+          <Text style={styles.patternMetricLabel}>BC missed</Text>
         </View>
       </View>
 
@@ -1416,8 +1495,73 @@ function PatternSideBlock({
           ))}
         </View>
       )}
+
+      {patterns.recurringPatterns && patterns.recurringPatterns.length > 0 && (
+        <View style={styles.recurringWrap}>
+          <Text style={styles.recurringHeading}>Recurring patterns</Text>
+          {patterns.recurringPatterns.slice(0, 6).map((rp) => (
+            <View key={rp.key} style={styles.recurringRow}>
+              <View style={styles.recurringHeader}>
+                <Text style={styles.recurringLabel}>{rp.label}</Text>
+                <Text style={styles.recurringCount}>{rp.count}/{rp.total}</Text>
+              </View>
+              {rp.evidence ? <Text style={styles.recurringEvidence}>{rp.evidence}</Text> : null}
+            </View>
+          ))}
+        </View>
+      )}
+
+      {patterns.matchStories && patterns.matchStories.length > 0 && (
+        <View style={styles.storiesWrap}>
+          <Text style={styles.recurringHeading}>Match-by-match (last {patterns.matchStories.length})</Text>
+          {patterns.matchStories.slice(0, 8).map((s) => {
+            const resColor = s.result === "W" ? "#22c55e" : s.result === "L" ? "#ef4444" : "#94a3b8";
+            const xgTxt = s.xgFor != null && s.xgAgainst != null
+              ? `xG ${s.xgFor.toFixed(1)}-${s.xgAgainst.toFixed(1)}`
+              : null;
+            return (
+              <View key={s.eventId} style={styles.storyRow}>
+                <View style={styles.storyTopLine}>
+                  <Text style={[styles.storyResult, { color: resColor }]}>{s.result}</Text>
+                  <Text style={styles.storyVenue}>{s.venue}</Text>
+                  <Text style={styles.storyOpp} numberOfLines={1}>{s.opponent}</Text>
+                  <Text style={styles.storyScore}>{s.goalsFor}-{s.goalsAgainst}</Text>
+                  {xgTxt && <Text style={styles.storyXg}>{xgTxt}</Text>}
+                </View>
+                {s.narratives.length > 0 && (
+                  <View style={styles.storyNarrativeWrap}>
+                    {s.narratives.slice(0, 3).map((n) => (
+                      <View key={n} style={styles.storyNarrativeChip}>
+                        <Text style={styles.storyNarrativeText}>{narrativeChipLabel(n)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      )}
     </View>
   );
+}
+
+function narrativeChipLabel(n: MatchNarrative): string {
+  switch (n) {
+    case "unluckyLoss":     return "unlucky loss";
+    case "wastedDominance": return "wasted dominance";
+    case "luckyWin":        return "lucky win";
+    case "smashAndGrab":    return "smash & grab";
+    case "dominantWin":     return "dominant";
+    case "exploitedWeakDef":return "exploited weak D";
+    case "outclassed":      return "outclassed";
+    case "comeback":        return "comeback";
+    case "blewLead":        return "blew lead";
+    case "openTradeoff":    return "open trade-off";
+    case "lateShow":        return "late show";
+    case "fastStart":       return "fast start";
+    case "deadlock":        return "deadlock";
+  }
 }
 
 function ScoringPatternsCard({
@@ -2541,7 +2685,8 @@ const styles = StyleSheet.create({
   },
   patternMetricsRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
+    flexWrap: "wrap",
+    rowGap: 8,
     marginBottom: 10,
     backgroundColor: "rgba(255,255,255,0.03)",
     borderRadius: 8,
@@ -2549,8 +2694,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   patternMetricCell: {
-    flex: 1,
+    width: "25%",
     alignItems: "center",
+    paddingVertical: 2,
   },
   patternMetricVal: {
     fontSize: 14,
@@ -2680,5 +2826,114 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: "Inter_500Medium",
     color: Colors.dark.text,
+  },
+  recurringWrap: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  recurringHeading: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textSecondary,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+  recurringRow: {
+    backgroundColor: "rgba(168,85,247,0.07)",
+    borderLeftWidth: 2,
+    borderLeftColor: "#a855f7",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  recurringHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  recurringLabel: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  recurringCount: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: "#a855f7",
+    marginLeft: 6,
+  },
+  recurringEvidence: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 2,
+  },
+  storiesWrap: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  storyRow: {
+    paddingVertical: 5,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.03)",
+  },
+  storyTopLine: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  storyResult: {
+    width: 18,
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  storyVenue: {
+    width: 18,
+    fontSize: 10,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textTertiary,
+  },
+  storyOpp: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.text,
+  },
+  storyScore: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+    marginLeft: 6,
+  },
+  storyXg: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginLeft: 8,
+  },
+  storyNarrativeWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginTop: 3,
+    marginLeft: 36,
+  },
+  storyNarrativeChip: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    marginRight: 4,
+    marginBottom: 2,
+  },
+  storyNarrativeText: {
+    fontSize: 9,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
   },
 });
