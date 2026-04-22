@@ -133,8 +133,39 @@ type MatchStory = {
   possession: number | null;
   firstGoalMin: number | null;
   firstConcMin: number | null;
+  wasTwoBehind: boolean;
+  goalsAfterTwoBehind: number;
+  wasTwoAhead: boolean;
+  concededAfterTwoAhead: number;
+  scoredFirst: boolean;
+  concededFirst: boolean;
+  goalsAfterScoringFirst: number;
+  concededAfterScoringFirst: number;
+  goalsAfterConcedingFirst: number;
+  concededAfterConcedingFirst: number;
   narratives: MatchNarrative[];
   oneLine: string;
+};
+
+type HiddenTruth = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  signal: "positive" | "negative" | "neutral";
+};
+
+type MatchupCrossRef = {
+  key: string;
+  headline: string;
+  detail: string;
+  forSide: "home" | "away" | "both";
+};
+
+type SimulationInsights = {
+  home: HiddenTruth[];
+  away: HiddenTruth[];
+  matchup: MatchupCrossRef[];
 };
 
 type RecurringPattern = {
@@ -265,16 +296,48 @@ function buildMatchStory(
   let firstGoalMin: number | null = null;
   let firstConcMin: number | null = null;
   let everBehind = false, everLed = false;
+  let wasTwoBehind = false, wasTwoAhead = false;
+  let goalsAfterTwoBehind = 0, concededAfterTwoAhead = 0;
+  let goalsAfterScoringFirst = 0, concededAfterScoringFirst = 0;
+  let goalsAfterConcedingFirst = 0, concededAfterConcedingFirst = 0;
+  let scoredFirst = false, concededFirst = false;
   let prev = { time: 0, homeScore: 0, awayScore: 0 };
   for (const g of goals) {
     const tF = isHome ? g.homeScore : g.awayScore;
     const oF = isHome ? g.awayScore : g.homeScore;
     const tP = isHome ? prev.homeScore : prev.awayScore;
     const oP = isHome ? prev.awayScore : prev.homeScore;
-    if (tF > tP && firstGoalMin === null) firstGoalMin = g.time;
-    if (oF > oP && firstConcMin === null) firstConcMin = g.time;
+    const teamGoalNow = tF > tP;
+    const oppGoalNow  = oF > oP;
+    if (teamGoalNow && firstGoalMin === null) {
+      firstGoalMin = g.time;
+      if (firstConcMin === null) scoredFirst = true;
+    }
+    if (oppGoalNow && firstConcMin === null) {
+      firstConcMin = g.time;
+      if (firstGoalMin === null) concededFirst = true;
+    }
     if (oF > tF) everBehind = true;
     if (tF > oF) everLed = true;
+
+    // Track goals after going 2 behind / 2 ahead
+    if (wasTwoBehind && teamGoalNow) goalsAfterTwoBehind++;
+    if (wasTwoAhead && oppGoalNow) concededAfterTwoAhead++;
+
+    // Track post-first-goal flow
+    if (scoredFirst && firstGoalMin !== null && g.time > firstGoalMin) {
+      if (teamGoalNow) goalsAfterScoringFirst++;
+      if (oppGoalNow)  concededAfterScoringFirst++;
+    }
+    if (concededFirst && firstConcMin !== null && g.time > firstConcMin) {
+      if (teamGoalNow) goalsAfterConcedingFirst++;
+      if (oppGoalNow)  concededAfterConcedingFirst++;
+    }
+
+    // Update behind/ahead-by-2 flags AFTER counting (so first goal that puts opp 2 up doesn't immediately count)
+    if (oF - tF >= 2) wasTwoBehind = true;
+    if (tF - oF >= 2) wasTwoAhead = true;
+
     prev = g;
   }
 
@@ -323,6 +386,16 @@ function buildMatchStory(
     possession,
     firstGoalMin,
     firstConcMin,
+    wasTwoBehind,
+    goalsAfterTwoBehind,
+    wasTwoAhead,
+    concededAfterTwoAhead,
+    scoredFirst,
+    concededFirst,
+    goalsAfterScoringFirst,
+    concededAfterScoringFirst,
+    goalsAfterConcedingFirst,
+    concededAfterConcedingFirst,
     narratives,
     oneLine,
   };
@@ -720,6 +793,604 @@ function computeScoringPatterns(
       matchesVsResoluteOpp:  vsResoluteCount,
     },
   };
+}
+
+function stdev(nums: number[]): number {
+  if (nums.length < 2) return 0;
+  const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+  const variance = nums.reduce((s, x) => s + (x - mean) ** 2, 0) / nums.length;
+  return Math.sqrt(variance);
+}
+
+function pointsForResult(r: "W" | "D" | "L"): number {
+  return r === "W" ? 3 : r === "D" ? 1 : 0;
+}
+
+function computeHiddenTruths(patterns: ScoringPatterns): HiddenTruth[] {
+  const truths: HiddenTruth[] = [];
+  // Stories arrive sorted DESC by date — work with ASC for sequence analysis
+  const asc = [...patterns.matchStories].sort((a, b) => a.date - b.date);
+  if (asc.length === 0) return truths;
+
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const r2 = (v: number) => Math.round(v * 100) / 100;
+  const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 100) : null;
+
+  // ── Luck index (offensive) — avg(goalsFor − xgFor) ─────────────────
+  const xgPairs = asc.filter(s => s.xgFor != null);
+  if (xgPairs.length >= 4) {
+    const luck = xgPairs.reduce((s, x) => s + (x.goalsFor - (x.xgFor as number)), 0) / xgPairs.length;
+    const sign = luck > 0 ? "+" : "";
+    if (Math.abs(luck) >= 0.4) {
+      truths.push({
+        key: "luck_index",
+        label: "Luck factor (attack)",
+        value: `${sign}${r2(luck)}/match`,
+        detail: luck > 0
+          ? "Outscoring the underlying chances — riding form that historically reverts."
+          : "Underscoring the underlying chances — sat on the wrong side of variance.",
+        signal: luck > 0 ? "positive" : "negative",
+      });
+    } else if (Math.abs(luck) >= 0.2) {
+      truths.push({
+        key: "luck_index",
+        label: "Luck factor (attack)",
+        value: `${sign}${r2(luck)}/match`,
+        detail: luck > 0 ? "Mildly overperforming xG." : "Mildly underperforming xG.",
+        signal: "neutral",
+      });
+    }
+  }
+
+  // ── Defensive luck — avg(xgAgainst − goalsAgainst) ─────────────────
+  const xgaPairs = asc.filter(s => s.xgAgainst != null);
+  if (xgaPairs.length >= 4) {
+    const dluck = xgaPairs.reduce((s, x) => s + ((x.xgAgainst as number) - x.goalsAgainst), 0) / xgaPairs.length;
+    if (Math.abs(dluck) >= 0.4) {
+      const sign = dluck > 0 ? "+" : "";
+      truths.push({
+        key: "luck_index_def",
+        label: "Luck factor (defence)",
+        value: `${sign}${r2(dluck)}/match`,
+        detail: dluck > 0
+          ? "Conceding fewer than the chances allowed — keeper/finishing variance bailing them out."
+          : "Conceding more than the chances suggest — punished above expectation.",
+        signal: dluck > 0 ? "positive" : "negative",
+      });
+    }
+  }
+
+  // ── Volatility — stdev of goal differential ────────────────────────
+  if (asc.length >= 5) {
+    const diffs = asc.map(s => s.goalsFor - s.goalsAgainst);
+    const sd = stdev(diffs);
+    if (sd >= 1.8) {
+      truths.push({
+        key: "volatility",
+        label: "Performance volatility",
+        value: `σ ${r2(sd)} goals`,
+        detail: "Wild swings between matches — performance hard to predict from one match to the next.",
+        signal: "negative",
+      });
+    } else if (sd <= 1.0) {
+      truths.push({
+        key: "volatility",
+        label: "Performance volatility",
+        value: `σ ${r2(sd)} goals`,
+        detail: "Steady, repeatable output — what you see is what you get.",
+        signal: "positive",
+      });
+    }
+  }
+
+  // ── Bounce-back DNA after a loss ───────────────────────────────────
+  let postLossSamples = 0, postLossWins = 0, postLossLosses = 0;
+  for (let i = 0; i < asc.length - 1; i++) {
+    if (asc[i].result === "L") {
+      postLossSamples++;
+      if (asc[i + 1].result === "W") postLossWins++;
+      if (asc[i + 1].result === "L") postLossLosses++;
+    }
+  }
+  if (postLossSamples >= 3) {
+    const winRate = pct(postLossWins, postLossSamples)!;
+    const lossRate = pct(postLossLosses, postLossSamples)!;
+    if (winRate >= 60) {
+      truths.push({
+        key: "bounce_back",
+        label: "Reaction after a loss",
+        value: `${winRate}% win-rate (${postLossWins}/${postLossSamples})`,
+        detail: "Bounce-back mentality — losses spark a response.",
+        signal: "positive",
+      });
+    } else if (lossRate >= 50) {
+      truths.push({
+        key: "bounce_back",
+        label: "Reaction after a loss",
+        value: `${lossRate}% loss-rate (${postLossLosses}/${postLossSamples})`,
+        detail: "Spiral risk — bad results tend to compound, not correct.",
+        signal: "negative",
+      });
+    } else {
+      truths.push({
+        key: "bounce_back",
+        label: "Reaction after a loss",
+        value: `${winRate}% win / ${lossRate}% loss`,
+        detail: "Mixed reaction — neither a clear bounce nor a clear spiral.",
+        signal: "neutral",
+      });
+    }
+  }
+
+  // ── Complacency after a win ────────────────────────────────────────
+  let postWinSamples = 0, postWinWins = 0, postWinNonWins = 0;
+  for (let i = 0; i < asc.length - 1; i++) {
+    if (asc[i].result === "W") {
+      postWinSamples++;
+      if (asc[i + 1].result === "W") postWinWins++;
+      else postWinNonWins++;
+    }
+  }
+  if (postWinSamples >= 3) {
+    const w = pct(postWinWins, postWinSamples)!;
+    const nw = pct(postWinNonWins, postWinSamples)!;
+    if (w >= 60) {
+      truths.push({
+        key: "post_win",
+        label: "Reaction after a win",
+        value: `${w}% follow-up wins (${postWinWins}/${postWinSamples})`,
+        detail: "Confidence carries — winning culture stacks results.",
+        signal: "positive",
+      });
+    } else if (nw >= 65) {
+      truths.push({
+        key: "post_win",
+        label: "Reaction after a win",
+        value: `${nw}% slip-ups (${postWinNonWins}/${postWinSamples})`,
+        detail: "Complacency tax — wins rarely chained, drop-off after success.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Post-draw response ─────────────────────────────────────────────
+  let postDrawSamples = 0, postDrawWins = 0;
+  for (let i = 0; i < asc.length - 1; i++) {
+    if (asc[i].result === "D") {
+      postDrawSamples++;
+      if (asc[i + 1].result === "W") postDrawWins++;
+    }
+  }
+  if (postDrawSamples >= 2) {
+    const w = pct(postDrawWins, postDrawSamples)!;
+    if (w >= 60) {
+      truths.push({
+        key: "post_draw",
+        label: "Reaction after a draw",
+        value: `${w}% next-match wins`,
+        detail: "Use draws as a springboard — frustration converts to a win.",
+        signal: "positive",
+      });
+    } else if (w === 0) {
+      truths.push({
+        key: "post_draw",
+        label: "Reaction after a draw",
+        value: `0/${postDrawSamples} wins after a draw`,
+        detail: "Draws drift into stagnation rather than a kick.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Mixed-result whiplash (recent W/L oscillation) ─────────────────
+  const last5 = asc.slice(-5);
+  if (last5.length === 5) {
+    let switches = 0;
+    for (let i = 1; i < last5.length; i++) {
+      if (last5[i].result !== last5[i - 1].result) switches++;
+    }
+    if (switches >= 4) {
+      truths.push({
+        key: "whiplash",
+        label: "Form rhythm",
+        value: `${switches}/4 result switches in last 5`,
+        detail: "Whiplash form — never two of the same result in a row, mindset shifting match-to-match.",
+        signal: "negative",
+      });
+    } else if (switches <= 1) {
+      const dominant = last5[last5.length - 1].result;
+      truths.push({
+        key: "whiplash",
+        label: "Form rhythm",
+        value: `${dominant}-heavy run`,
+        detail: dominant === "W" ? "Settled into winning rhythm." : dominant === "L" ? "Stuck in a losing rut." : "Stuck in a draw groove.",
+        signal: dominant === "W" ? "positive" : "negative",
+      });
+    }
+  }
+
+  // ── Mindset vs strong / weak opps (xGA proxy) ──────────────────────
+  const vsStrong = asc.filter(s => s.xgAgainst != null && (s.xgAgainst as number) >= 1.7);
+  const vsWeak   = asc.filter(s => s.xgAgainst != null && (s.xgAgainst as number) <= 0.8);
+  if (vsStrong.length >= 3) {
+    const pts = vsStrong.reduce((s, x) => s + pointsForResult(x.result), 0);
+    const ppm = pts / vsStrong.length;
+    if (ppm <= 0.6) {
+      truths.push({
+        key: "vs_strong",
+        label: "Mindset vs strong sides",
+        value: `${r2(ppm)} pts/match (${vsStrong.length} fixtures)`,
+        detail: "Stage fright — visibly shrink against high-pressure opposition.",
+        signal: "negative",
+      });
+    } else if (ppm >= 1.8) {
+      truths.push({
+        key: "vs_strong",
+        label: "Mindset vs strong sides",
+        value: `${r2(ppm)} pts/match`,
+        detail: "Rise to the occasion — perform above their level vs strong sides.",
+        signal: "positive",
+      });
+    }
+  }
+  if (vsWeak.length >= 3) {
+    const pts = vsWeak.reduce((s, x) => s + pointsForResult(x.result), 0);
+    const ppm = pts / vsWeak.length;
+    if (ppm >= 2.4) {
+      truths.push({
+        key: "vs_weak",
+        label: "Mindset vs lesser sides",
+        value: `${r2(ppm)} pts/match`,
+        detail: "Bully smaller opponents — cash in when chances drop in their lap.",
+        signal: "positive",
+      });
+    } else if (ppm <= 1.2) {
+      truths.push({
+        key: "vs_weak",
+        label: "Mindset vs lesser sides",
+        value: `${r2(ppm)} pts/match`,
+        detail: "Underperform when expected to win — trip over weaker opposition.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Home / Away mindset ────────────────────────────────────────────
+  const homeMatches = asc.filter(s => s.venue === "H");
+  const awayMatches = asc.filter(s => s.venue === "A");
+  if (homeMatches.length >= 3 && awayMatches.length >= 3) {
+    const hPpm = homeMatches.reduce((s, x) => s + pointsForResult(x.result), 0) / homeMatches.length;
+    const aPpm = awayMatches.reduce((s, x) => s + pointsForResult(x.result), 0) / awayMatches.length;
+    const gap = hPpm - aPpm;
+    if (gap >= 1.2) {
+      truths.push({
+        key: "home_away_mindset",
+        label: "Travel mindset",
+        value: `H ${r2(hPpm)} vs A ${r2(aPpm)} pts/match`,
+        detail: "Different team on the road — fortress at home, travel-sick away.",
+        signal: "negative",
+      });
+    } else if (gap <= -0.6) {
+      truths.push({
+        key: "home_away_mindset",
+        label: "Travel mindset",
+        value: `A ${r2(aPpm)} vs H ${r2(hPpm)} pts/match`,
+        detail: "Better travellers than hosts — thrive away from home pressure.",
+        signal: "positive",
+      });
+    } else if (gap >= 0.4 && gap < 1.2) {
+      truths.push({
+        key: "home_away_mindset",
+        label: "Travel mindset",
+        value: `H ${r2(hPpm)} vs A ${r2(aPpm)} pts/match`,
+        detail: "Modest home tilt — perform fairly evenly home and away.",
+        signal: "neutral",
+      });
+    }
+  }
+
+  // ── Give-up strength: response after going 2 behind ───────────────
+  const twoBehindMatches = asc.filter(s => s.wasTwoBehind);
+  if (twoBehindMatches.length >= 2) {
+    const goalsBack = twoBehindMatches.reduce((s, x) => s + x.goalsAfterTwoBehind, 0);
+    const avgBack = goalsBack / twoBehindMatches.length;
+    if (avgBack >= 1.0) {
+      truths.push({
+        key: "give_up_strength",
+        label: "Fight when 2 behind",
+        value: `${r2(avgBack)} goals back/match (${twoBehindMatches.length} cases)`,
+        detail: "Refuse to fold — keep swinging even from a two-goal hole.",
+        signal: "positive",
+      });
+    } else if (avgBack <= 0.3) {
+      truths.push({
+        key: "give_up_strength",
+        label: "Fight when 2 behind",
+        value: `${r2(avgBack)} goals back/match`,
+        detail: "Heads drop early — once two down, the game is over for them.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Protect-lead strength: response after going 2 ahead ───────────
+  const twoAheadMatches = asc.filter(s => s.wasTwoAhead);
+  if (twoAheadMatches.length >= 2) {
+    const concBack = twoAheadMatches.reduce((s, x) => s + x.concededAfterTwoAhead, 0);
+    const avgConc = concBack / twoAheadMatches.length;
+    if (avgConc <= 0.3) {
+      truths.push({
+        key: "protect_lead",
+        label: "Game-management with a 2-goal lead",
+        value: `${r2(avgConc)} conceded/match`,
+        detail: "Slam the door shut — rarely give up goals once two ahead.",
+        signal: "positive",
+      });
+    } else if (avgConc >= 1.0) {
+      truths.push({
+        key: "protect_lead",
+        label: "Game-management with a 2-goal lead",
+        value: `${r2(avgConc)} conceded/match`,
+        detail: "Switch off when comfortable — let opponents back into matches they shouldn't.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Discipline after scoring first ────────────────────────────────
+  const sfMatches = asc.filter(s => s.scoredFirst);
+  if (sfMatches.length >= 3) {
+    const concAfter = sfMatches.reduce((s, x) => s + x.concededAfterScoringFirst, 0) / sfMatches.length;
+    if (concAfter >= 1.2) {
+      truths.push({
+        key: "post_scoring_first",
+        label: "Discipline after scoring first",
+        value: `${r2(concAfter)} conceded after going 1-0 up`,
+        detail: "Drop tempo when ahead — invite pressure they don't need.",
+        signal: "negative",
+      });
+    } else if (concAfter <= 0.4) {
+      truths.push({
+        key: "post_scoring_first",
+        label: "Discipline after scoring first",
+        value: `${r2(concAfter)} conceded after going 1-0 up`,
+        detail: "Press on after the opener — kill matches early.",
+        signal: "positive",
+      });
+    }
+  }
+
+  // ── Decision-making after conceding first ─────────────────────────
+  const cfMatches = asc.filter(s => s.concededFirst);
+  if (cfMatches.length >= 3) {
+    const goalsAfter = cfMatches.reduce((s, x) => s + x.goalsAfterConcedingFirst, 0) / cfMatches.length;
+    const concAfter  = cfMatches.reduce((s, x) => s + x.concededAfterConcedingFirst, 0) / cfMatches.length;
+    if (goalsAfter >= 1.3 && goalsAfter > concAfter) {
+      truths.push({
+        key: "post_conceding_first",
+        label: "Response after conceding first",
+        value: `${r2(goalsAfter)} scored vs ${r2(concAfter)} conceded`,
+        detail: "Switch into attack mode after going behind — calculated, not panicked.",
+        signal: "positive",
+      });
+    } else if (concAfter >= goalsAfter + 0.6) {
+      truths.push({
+        key: "post_conceding_first",
+        label: "Response after conceding first",
+        value: `${r2(goalsAfter)} scored vs ${r2(concAfter)} conceded`,
+        detail: "Concede in clusters — a goal against tends to invite a second.",
+        signal: "negative",
+      });
+    }
+  }
+
+  // ── Style-of-play timing fingerprint ──────────────────────────────
+  if (patterns.peakScoringWindow && patterns.vulnerabilityWindow) {
+    const peak = patterns.peakScoringWindow;
+    const vuln = patterns.vulnerabilityWindow;
+    if (peak === "76–90′" && vuln === "76–90′") {
+      truths.push({
+        key: "style_timing",
+        label: "Late-game character",
+        value: `Peak & weak both ${peak}`,
+        detail: "Final 15 minutes are chaos — equally likely to win or lose it late.",
+        signal: "neutral",
+      });
+    } else if (peak === "0–15′" && (vuln === "76–90′" || vuln === "61–75′")) {
+      truths.push({
+        key: "style_timing",
+        label: "Style timing fingerprint",
+        value: `Score early, fade late`,
+        detail: "Front-load energy — opening burst, end-game vulnerability.",
+        signal: "negative",
+      });
+    } else if ((peak === "61–75′" || peak === "76–90′") && (vuln === "0–15′" || vuln === "16–30′")) {
+      truths.push({
+        key: "style_timing",
+        label: "Style timing fingerprint",
+        value: `Slow into matches, dangerous late`,
+        detail: "Need a feel for the game — once in rhythm, late surge is real.",
+        signal: "neutral",
+      });
+    }
+  }
+
+  return truths;
+}
+
+function tagDirection(tag: string | null): "good" | "bad" | null {
+  if (!tag) return null;
+  if (["Deadly", "Clinical", "Resolute", "Solid"].includes(tag)) return "good";
+  if (["Wasteful", "Flop", "Leaky", "Sieve"].includes(tag)) return "bad";
+  return null;
+}
+
+function computeMatchupCrossRefs(
+  homeName: string,
+  awayName: string,
+  homePatterns: ScoringPatterns,
+  awayPatterns: ScoringPatterns,
+  homeHidden: HiddenTruth[],
+  awayHidden: HiddenTruth[],
+): MatchupCrossRef[] {
+  const refs: MatchupCrossRef[] = [];
+
+  const sides: Array<{ name: string; opp: string; pat: ScoringPatterns; oppPat: ScoringPatterns; hidden: HiddenTruth[]; oppHidden: HiddenTruth[]; key: "home" | "away" }> = [
+    { name: homeName, opp: awayName, pat: homePatterns, oppPat: awayPatterns, hidden: homeHidden, oppHidden: awayHidden, key: "home" },
+    { name: awayName, opp: homeName, pat: awayPatterns, oppPat: homePatterns, hidden: awayHidden, oppHidden: homeHidden, key: "away" },
+  ];
+
+  // ── Pattern-vs-tag collisions ─────────────────────────────────────
+  for (const s of sides) {
+    const pat = s.pat;
+    const oppDef = s.oppPat.defensiveTag;
+    const oppFin = s.oppPat.finishingTag;
+
+    const has = (k: string) => pat.recurringPatterns.some(r => r.key === k);
+    const oppHas = (k: string) => s.oppPat.recurringPatterns.some(r => r.key === k);
+
+    if (has("unluckyLoss") && (oppDef === "Leaky" || oppDef === "Sieve")) {
+      refs.push({
+        key: `${s.key}_unlucky_vs_leaky`,
+        forSide: s.key,
+        headline: `${s.name}'s unlucky-loss streak meets ${s.opp}'s ${oppDef.toLowerCase()} back-line`,
+        detail: "Created chances pattern colliding with a defence that lets chances become goals.",
+      });
+    }
+    if (has("wastedDominance") && (oppDef === "Resolute" || oppDef === "Solid")) {
+      refs.push({
+        key: `${s.key}_wasted_vs_resolute`,
+        forSide: s.key,
+        headline: `${s.name}'s wasted-dominance habit vs ${s.opp}'s ${oppDef.toLowerCase()} defence`,
+        detail: "Volume-without-end-product trait runs into a defence built to soak it up.",
+      });
+    }
+    if (has("xg_underperformer_streak") && (oppDef === "Leaky" || oppDef === "Sieve")) {
+      refs.push({
+        key: `${s.key}_under_xg_vs_leaky`,
+        forSide: s.key,
+        headline: `${s.name}'s under-xG streak meets a ${oppDef.toLowerCase()} back-line`,
+        detail: "Mean-reversion candidate facing a defence that historically forgives.",
+      });
+    }
+    if (has("xg_overperformer_streak") && (oppDef === "Resolute" || oppDef === "Solid")) {
+      refs.push({
+        key: `${s.key}_over_xg_vs_resolute`,
+        forSide: s.key,
+        headline: `${s.name}'s over-xG run meets ${s.opp}'s ${oppDef.toLowerCase()} defence`,
+        detail: "Hot-finishing trend collides with a defence that has been compressing chance quality.",
+      });
+    }
+    if (has("comeback_kings") && oppHas("frontrunner_chokers")) {
+      refs.push({
+        key: `${s.key}_comeback_vs_choker`,
+        forSide: "both",
+        headline: `${s.name}'s comeback DNA collides with ${s.opp}'s lead-blowing trait`,
+        detail: "If the script flips after an early opener, both teams have form for losing the plot in opposite directions.",
+      });
+    }
+    if (has("frontrunner_chokers") && oppHas("comeback_kings")) {
+      // covered by mirrored side; skip duplicate
+    }
+    if (has("always_score_first") && oppHas("always_concede_first")) {
+      refs.push({
+        key: `${s.key}_first_blood_lock`,
+        forSide: "both",
+        headline: `${s.name} usually draws first blood; ${s.opp} usually concedes first`,
+        detail: "Habits of both teams point in the same direction on opening-goal control.",
+      });
+    }
+    if (has("smashAndGrab") && (oppFin === "Wasteful" || oppFin === "Flop")) {
+      refs.push({
+        key: `${s.key}_grab_vs_wasteful`,
+        forSide: s.key,
+        headline: `${s.name}'s smash-&-grab habit meets ${s.opp}'s ${oppFin.toLowerCase()} finishing`,
+        detail: "Low-chance opportunism on one side, struggle to convert on the other.",
+      });
+    }
+    if (has("exploitedWeakDef") && (oppDef === "Leaky" || oppDef === "Sieve")) {
+      refs.push({
+        key: `${s.key}_steamroll_vs_sieve`,
+        forSide: s.key,
+        headline: `${s.name} repeatedly punish weak defences — ${s.opp} arrive ${oppDef.toLowerCase()}`,
+        detail: "Profile of damage-dealer crossing paths with profile of damage-taker.",
+      });
+    }
+    if (has("always_late_show") && oppHas("always_late_show")) {
+      refs.push({
+        key: `late_show_collision`,
+        forSide: "both",
+        headline: `Both teams settle matches after 70′`,
+        detail: "Two late-show profiles together — game is unlikely to be over before the closing stretch.",
+      });
+    }
+    if (has("always_fast_start") && oppHas("always_fast_start")) {
+      refs.push({
+        key: `fast_start_collision`,
+        forSide: "both",
+        headline: `Both teams habitually score in opening 15′`,
+        detail: "Two front-foot starters meeting — opening exchanges weighted with intent.",
+      });
+    }
+  }
+
+  // ── Hidden-truth-vs-hidden-truth comparisons ───────────────────────
+  function pickByKey(arr: HiddenTruth[], k: string): HiddenTruth | undefined {
+    return arr.find(t => t.key === k);
+  }
+  const compareKeys: { key: string; nice: string }[] = [
+    { key: "luck_index",          nice: "Luck factor (attack)" },
+    { key: "luck_index_def",      nice: "Luck factor (defence)" },
+    { key: "volatility",          nice: "Volatility" },
+    { key: "bounce_back",         nice: "Reaction after a loss" },
+    { key: "post_win",            nice: "Reaction after a win" },
+    { key: "post_draw",           nice: "Reaction after a draw" },
+    { key: "vs_strong",           nice: "Mindset vs strong sides" },
+    { key: "vs_weak",             nice: "Mindset vs lesser sides" },
+    { key: "home_away_mindset",   nice: "Travel mindset" },
+    { key: "give_up_strength",    nice: "Fight when 2 behind" },
+    { key: "protect_lead",        nice: "Game-management with a lead" },
+    { key: "post_scoring_first",  nice: "Discipline after scoring first" },
+    { key: "post_conceding_first",nice: "Response after conceding first" },
+    { key: "style_timing",        nice: "Style timing fingerprint" },
+    { key: "whiplash",            nice: "Form rhythm" },
+  ];
+  for (const c of compareKeys) {
+    const h = pickByKey(homeHidden, c.key);
+    const a = pickByKey(awayHidden, c.key);
+    if (!h && !a) continue;
+
+    let headline = "";
+    let detail = "";
+    if (h && a) {
+      // Both teams have this trait — direct juxtaposition
+      if (h.signal !== a.signal && (h.signal === "positive" || a.signal === "positive")) {
+        const pos = h.signal === "positive" ? homeName : awayName;
+        const neg = h.signal === "positive" ? awayName : homeName;
+        headline = `${c.nice}: ${pos} edge`;
+        detail = `${homeName}: ${h.value} — ${h.detail.replace(/[.\s]+$/, "")}. ${awayName}: ${a.value} — ${a.detail.replace(/[.\s]+$/, "")}.`;
+      } else {
+        headline = `${c.nice}: both teams flagged`;
+        detail = `${homeName}: ${h.value} — ${h.detail.replace(/[.\s]+$/, "")}. ${awayName}: ${a.value} — ${a.detail.replace(/[.\s]+$/, "")}.`;
+      }
+    } else if (h) {
+      headline = `${c.nice}: only ${homeName} flagged`;
+      detail   = `${homeName}: ${h.value} — ${h.detail} ${awayName} shows no clear trait here.`;
+    } else if (a) {
+      headline = `${c.nice}: only ${awayName} flagged`;
+      detail   = `${awayName}: ${a!.value} — ${a!.detail} ${homeName} shows no clear trait here.`;
+    }
+    refs.push({
+      key: `cmp_${c.key}`,
+      forSide: "both",
+      headline,
+      detail,
+    });
+  }
+
+  // Deduplicate by key (collisions emitted from both sides)
+  const seen = new Set<string>();
+  return refs.filter((r) => (seen.has(r.key) ? false : (seen.add(r.key), true)));
 }
 
 function parseGoalTimeline(incidentsData: any): GoalState[] {
@@ -2499,9 +3170,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
+        const homeHidden = computeHiddenTruths(homePatterns);
+        const awayHidden = computeHiddenTruths(awayPatterns);
+        const homeName = currentEvent?.homeTeam?.shortName || currentEvent?.homeTeam?.name || "Home";
+        const awayName = currentEvent?.awayTeam?.shortName || currentEvent?.awayTeam?.name || "Away";
+        const matchupCrossRefs = computeMatchupCrossRefs(homeName, awayName, homePatterns, awayPatterns, homeHidden, awayHidden);
+        const simulationInsights: SimulationInsights = { home: homeHidden, away: awayHidden, matchup: matchupCrossRefs };
+
         res.json({
           home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns },
           away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns },
+          simulationInsights,
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
         });

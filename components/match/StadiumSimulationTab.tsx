@@ -289,6 +289,28 @@ interface SimulationMetricsResponse {
     ssbi?: SSBI | null;
     scoringPatterns?: ScoringPatterns | null;
   };
+  simulationInsights?: SimulationInsights | null;
+}
+
+interface HiddenTruth {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  signal: "positive" | "negative" | "neutral";
+}
+
+interface MatchupCrossRef {
+  key: string;
+  headline: string;
+  detail: string;
+  forSide: "home" | "away" | "both";
+}
+
+interface SimulationInsights {
+  home: HiddenTruth[];
+  away: HiddenTruth[];
+  matchup: MatchupCrossRef[];
 }
 
 interface LiveEvent {
@@ -1594,6 +1616,118 @@ function ScoringPatternsCard({
   );
 }
 
+function signalColor(s: HiddenTruth["signal"]): string {
+  switch (s) {
+    case "positive": return "#22c55e";
+    case "negative": return "#ef4444";
+    default: return "#eab308";
+  }
+}
+
+function HiddenSideBlock({ teamName, side, truths }: { teamName: string; side: "home" | "away"; truths: HiddenTruth[] }) {
+  const sideColor = side === "home" ? "#3b82f6" : "#a855f7";
+  if (!truths || truths.length === 0) {
+    return (
+      <View style={styles.hiddenBlock}>
+        <View style={styles.patternHeader}>
+          <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+          <Text style={[styles.patternTeam, { color: sideColor }]} numberOfLines={1}>{teamName}</Text>
+        </View>
+        <Text style={styles.hiddenEmpty}>No hidden traits surfaced from the last 15 matches.</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.hiddenBlock}>
+      <View style={styles.patternHeader}>
+        <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+        <Text style={[styles.patternTeam, { color: sideColor }]} numberOfLines={1}>{teamName}</Text>
+        <Text style={styles.hiddenCount}>{truths.length} traits</Text>
+      </View>
+      {truths.map((t) => {
+        const c = signalColor(t.signal);
+        return (
+          <View key={t.key} style={[styles.hiddenRow, { borderLeftColor: c }]}>
+            <View style={styles.hiddenRowTop}>
+              <Text style={styles.hiddenLabel}>{t.label}</Text>
+              <Text style={[styles.hiddenValue, { color: c }]}>{t.value}</Text>
+            </View>
+            <Text style={styles.hiddenDetail}>{t.detail}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function HiddenTruthsCard({
+  homeTeamName,
+  awayTeamName,
+  insights,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  insights?: SimulationInsights | null;
+}) {
+  if (!insights) return null;
+  const home = insights.home || [];
+  const away = insights.away || [];
+  if (home.length === 0 && away.length === 0) return null;
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Hidden Truths · What the Stats Don't Show</Text>
+      <Text style={styles.patternIntro}>
+        Behavioural and psychological signatures hidden inside the last 15 matches — luck, mindset, reactions to results, give-up strength, style timing.
+      </Text>
+      <HiddenSideBlock teamName={homeTeamName} side="home" truths={home} />
+      <View style={{ height: 12 }} />
+      <HiddenSideBlock teamName={awayTeamName} side="away" truths={away} />
+    </View>
+  );
+}
+
+function MatchupCrossRefCard({
+  homeTeamName,
+  awayTeamName,
+  insights,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  insights?: SimulationInsights | null;
+}) {
+  if (!insights || !insights.matchup || insights.matchup.length === 0) return null;
+  const refs = insights.matchup;
+
+  const sideColorOf = (k: MatchupCrossRef["forSide"]) =>
+    k === "home" ? "#3b82f6" : k === "away" ? "#a855f7" : "#f59e0b";
+  const sideTagOf = (k: MatchupCrossRef["forSide"]) =>
+    k === "home" ? homeTeamName : k === "away" ? awayTeamName : "Matchup";
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Matchup Cross-Reference · {homeTeamName} vs {awayTeamName}</Text>
+      <Text style={styles.patternIntro}>
+        Each team's recurring patterns and hidden traits placed side-by-side against the opponent's profile. No score predictions — just where their fingerprints meet.
+      </Text>
+      {refs.map((r) => {
+        const c = sideColorOf(r.forSide);
+        return (
+          <View key={r.key} style={[styles.crossRefRow, { borderLeftColor: c }]}>
+            <View style={styles.crossRefTop}>
+              <View style={[styles.crossRefBadge, { borderColor: c }]}>
+                <Text style={[styles.crossRefBadgeText, { color: c }]}>{sideTagOf(r.forSide)}</Text>
+              </View>
+              <Text style={styles.crossRefHeadline}>{r.headline}</Text>
+            </View>
+            <Text style={styles.crossRefDetail}>{r.detail}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
@@ -1883,6 +2017,18 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homePatterns={simulationMetrics?.home?.scoringPatterns}
         awayPatterns={simulationMetrics?.away?.scoringPatterns}
+      />
+
+      <HiddenTruthsCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        insights={simulationMetrics?.simulationInsights}
+      />
+
+      <MatchupCrossRefCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        insights={simulationMetrics?.simulationInsights}
       />
 
       <TeamStatsCard
@@ -2935,5 +3081,93 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontFamily: "Inter_500Medium",
     color: Colors.dark.textSecondary,
+  },
+  hiddenBlock: {
+    backgroundColor: "rgba(255,255,255,0.02)",
+    borderRadius: 10,
+    padding: 10,
+  },
+  hiddenEmpty: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 4,
+  },
+  hiddenCount: {
+    marginLeft: "auto",
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textTertiary,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  hiddenRow: {
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 6,
+  },
+  hiddenRowTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 2,
+  },
+  hiddenLabel: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  hiddenValue: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    marginLeft: 6,
+  },
+  hiddenDetail: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 15,
+  },
+  crossRefRow: {
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 6,
+  },
+  crossRefTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  crossRefBadge: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    marginRight: 8,
+  },
+  crossRefBadgeText: {
+    fontSize: 9,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  crossRefHeadline: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  crossRefDetail: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 15,
   },
 });
