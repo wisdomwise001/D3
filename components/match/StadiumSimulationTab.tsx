@@ -201,6 +201,54 @@ interface ScoringPatterns {
   };
 }
 
+type CausalCause =
+  | "DefensiveStructure" | "TacticalDeadlock" | "AttackingDominance"
+  | "ClinicalFinishing" | "FinishingInefficiency" | "OpponentWastefulness"
+  | "DefensiveCollapse" | "LateDropOff" | "EarlyShock"
+  | "GameStateControl" | "OpponentClass";
+
+type Repeatability = "repeatable" | "variance" | "mixed";
+
+interface CausalMatch {
+  eventId: number;
+  date: number;
+  opponent: string;
+  venue: "H" | "A";
+  scoreline: string;
+  result: "W" | "D" | "L";
+  primaryCause: CausalCause;
+  primaryLabel: string;
+  secondaryCauses: CausalCause[];
+  repeatability: Repeatability;
+  reason: string;
+  bttsHit: boolean;
+  bttsReason: string;
+  bttsRepeatability: Repeatability;
+  over25Hit: boolean;
+  ouReason: string;
+  ouRepeatability: Repeatability;
+}
+
+interface CausalProfile {
+  matchesAnalyzed: number;
+  causes: { cause: CausalCause; label: string; count: number; pct: number; repeatability: Repeatability }[];
+  repeatableShare: number;
+  varianceShare: number;
+  mixedShare: number;
+  bttsTrueRate: number | null;
+  bttsRepeatableShare: number | null;
+  over25TrueRate: number | null;
+  over25RepeatableShare: number | null;
+  topReasons: string[];
+  matches: CausalMatch[];
+  predictionLeans: {
+    btts: { lean: string; confidence: number; reason: string };
+    ou25: { lean: string; confidence: number; reason: string };
+    scorelineShape: string;
+  };
+  summary: string;
+}
+
 interface PeriodStats {
   avgGoalsScored: number | null;
   avgGoalsConceded: number | null;
@@ -262,6 +310,7 @@ interface SimulationMetricsResponse {
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
     scoringPatterns?: ScoringPatterns | null;
+    causalAnalysis?: CausalProfile | null;
   };
   away?: {
     formation?: string | null;
@@ -288,6 +337,7 @@ interface SimulationMetricsResponse {
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
     scoringPatterns?: ScoringPatterns | null;
+    causalAnalysis?: CausalProfile | null;
   };
   simulationInsights?: SimulationInsights | null;
 }
@@ -1616,6 +1666,161 @@ function ScoringPatternsCard({
   );
 }
 
+function repeatColor(r: Repeatability): string {
+  return r === "repeatable" ? "#22c55e" : r === "variance" ? "#ef4444" : "#eab308";
+}
+function repeatLabel(r: Repeatability): string {
+  return r === "repeatable" ? "REPEATABLE" : r === "variance" ? "VARIANCE" : "MIXED";
+}
+function leanColor(lean: string): string {
+  if (lean === "Yes" || lean === "Over") return "#22c55e";
+  if (lean === "No" || lean === "Under") return "#ef4444";
+  if (lean.startsWith("Lean")) return "#f59e0b";
+  return "#94a3b8";
+}
+function resultColor(r: "W" | "D" | "L"): string {
+  return r === "W" ? "#22c55e" : r === "L" ? "#ef4444" : "#eab308";
+}
+
+function CausalSideBlock({ teamName, side, profile }: { teamName: string; side: "home" | "away"; profile?: CausalProfile | null }) {
+  const sideColor = side === "home" ? "#3b82f6" : "#a855f7";
+  if (!profile || profile.matchesAnalyzed === 0) {
+    return (
+      <View style={styles.hiddenBlock}>
+        <View style={styles.patternHeader}>
+          <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+          <Text style={[styles.patternTeam, { color: sideColor }]} numberOfLines={1}>{teamName}</Text>
+        </View>
+        <Text style={styles.hiddenEmpty}>Not enough data to build a causal profile.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.hiddenBlock}>
+      <View style={styles.patternHeader}>
+        <View style={[styles.patternSideDot, { backgroundColor: sideColor }]} />
+        <Text style={[styles.patternTeam, { color: sideColor }]} numberOfLines={1}>{teamName}</Text>
+        <Text style={styles.hiddenCount}>{profile.matchesAnalyzed} matches</Text>
+      </View>
+
+      {/* Repeatable vs Variance bar */}
+      <View style={styles.causalRepeatRow}>
+        <View style={styles.causalRepeatBar}>
+          <View style={[styles.causalRepeatSegment, { flex: profile.repeatableShare, backgroundColor: "#22c55e" }]} />
+          <View style={[styles.causalRepeatSegment, { flex: profile.mixedShare,      backgroundColor: "#eab308" }]} />
+          <View style={[styles.causalRepeatSegment, { flex: profile.varianceShare,   backgroundColor: "#ef4444" }]} />
+        </View>
+        <View style={styles.causalRepeatLegend}>
+          <Text style={[styles.causalRepeatChip, { color: "#22c55e" }]}>Repeatable {profile.repeatableShare}%</Text>
+          <Text style={[styles.causalRepeatChip, { color: "#eab308" }]}>Mixed {profile.mixedShare}%</Text>
+          <Text style={[styles.causalRepeatChip, { color: "#ef4444" }]}>Variance {profile.varianceShare}%</Text>
+        </View>
+      </View>
+
+      {/* Causes breakdown */}
+      <Text style={styles.causalSection}>Why results happened</Text>
+      {profile.causes.map((c) => {
+        const col = repeatColor(c.repeatability);
+        return (
+          <View key={c.cause} style={[styles.causalCauseRow, { borderLeftColor: col }]}>
+            <View style={styles.causalCauseTop}>
+              <Text style={styles.causalCauseLabel}>{c.label}</Text>
+              <View style={styles.causalCauseRight}>
+                <Text style={[styles.causalCauseTag, { color: col, borderColor: col }]}>{repeatLabel(c.repeatability)}</Text>
+                <Text style={styles.causalCauseValue}>{c.count} ({c.pct}%)</Text>
+              </View>
+            </View>
+            <View style={styles.causalCauseBarTrack}>
+              <View style={[styles.causalCauseBarFill, { width: `${Math.min(100, c.pct)}%`, backgroundColor: col }]} />
+            </View>
+          </View>
+        );
+      })}
+
+      {/* Forward-looking leans */}
+      <Text style={styles.causalSection}>Forward leans for this fixture</Text>
+      {(["btts", "ou25"] as const).map((k) => {
+        const lean = k === "btts" ? profile.predictionLeans.btts : profile.predictionLeans.ou25;
+        const title = k === "btts" ? "BTTS" : "Over/Under 2.5";
+        const col = leanColor(lean.lean);
+        return (
+          <View key={k} style={[styles.causalLeanRow, { borderLeftColor: col }]}>
+            <View style={styles.causalLeanTop}>
+              <Text style={styles.causalLeanTitle}>{title}</Text>
+              <Text style={[styles.causalLeanValue, { color: col }]}>{lean.lean}{lean.confidence > 0 ? `  ·  ${lean.confidence}%` : ""}</Text>
+            </View>
+            <Text style={styles.causalLeanReason}>{lean.reason}</Text>
+          </View>
+        );
+      })}
+      <View style={styles.causalShape}>
+        <Text style={styles.causalShapeLabel}>Likely scoreline shape</Text>
+        <Text style={styles.causalShapeValue}>{profile.predictionLeans.scorelineShape}</Text>
+      </View>
+
+      {/* Per-match causal log */}
+      <Text style={styles.causalSection}>Last {profile.matchesAnalyzed} matches — cause for each result</Text>
+      {profile.matches.map((m) => {
+        const col = repeatColor(m.repeatability);
+        const rc = resultColor(m.result);
+        return (
+          <View key={m.eventId} style={[styles.causalMatchRow, { borderLeftColor: col }]}>
+            <View style={styles.causalMatchTop}>
+              <Text style={[styles.causalMatchResult, { color: rc }]}>{m.result}</Text>
+              <Text style={styles.causalMatchScore}>{m.scoreline}</Text>
+              <Text style={styles.causalMatchOpp} numberOfLines={1}>{m.venue} vs {m.opponent}</Text>
+              <Text style={[styles.causalMatchTag, { color: col, borderColor: col }]}>{repeatLabel(m.repeatability)}</Text>
+            </View>
+            <Text style={styles.causalMatchPrimary}>{m.primaryLabel}</Text>
+            <Text style={styles.causalMatchReason}>{m.reason}</Text>
+            <View style={styles.causalSubRow}>
+              <Text style={[styles.causalSubChip, { color: m.bttsHit ? "#22c55e" : "#ef4444" }]}>BTTS {m.bttsHit ? "Yes" : "No"}</Text>
+              <Text style={styles.causalSubReason} numberOfLines={2}>{m.bttsReason}</Text>
+            </View>
+            <View style={styles.causalSubRow}>
+              <Text style={[styles.causalSubChip, { color: m.over25Hit ? "#22c55e" : "#ef4444" }]}>{m.over25Hit ? "Over 2.5" : "Under 2.5"}</Text>
+              <Text style={styles.causalSubReason} numberOfLines={2}>{m.ouReason}</Text>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function CausalAnalysisCard({
+  homeTeamName,
+  awayTeamName,
+  homeProfile,
+  awayProfile,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeProfile?: CausalProfile | null;
+  awayProfile?: CausalProfile | null;
+}) {
+  if (!homeProfile && !awayProfile) return null;
+  const hasAny = (homeProfile?.matchesAnalyzed || 0) > 0 || (awayProfile?.matchesAnalyzed || 0) > 0;
+  if (!hasAny) return null;
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Causal Analysis · Why Results Happened</Text>
+      <Text style={styles.patternIntro}>
+        Each of the last 15 results decoded into its underlying cause — defensive structure, tactical deadlock,
+        finishing inefficiency, opponent wastefulness, late drop-off, variance, etc. Causes are tagged
+        <Text style={{ color: "#22c55e" }}> repeatable</Text>,
+        <Text style={{ color: "#eab308" }}> mixed</Text>, or
+        <Text style={{ color: "#ef4444" }}> variance</Text>, and the BTTS / Over-Under leans below weight only the repeatable evidence.
+      </Text>
+      <CausalSideBlock teamName={homeTeamName} side="home" profile={homeProfile} />
+      <View style={{ height: 12 }} />
+      <CausalSideBlock teamName={awayTeamName} side="away" profile={awayProfile} />
+    </View>
+  );
+}
+
 function signalColor(s: HiddenTruth["signal"]): string {
   switch (s) {
     case "positive": return "#22c55e";
@@ -2017,6 +2222,13 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homePatterns={simulationMetrics?.home?.scoringPatterns}
         awayPatterns={simulationMetrics?.away?.scoringPatterns}
+      />
+
+      <CausalAnalysisCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeProfile={simulationMetrics?.home?.causalAnalysis}
+        awayProfile={simulationMetrics?.away?.causalAnalysis}
       />
 
       <HiddenTruthsCard
@@ -3169,5 +3381,201 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     color: Colors.dark.textSecondary,
     lineHeight: 15,
+  },
+
+  // ── Causal Analysis card ──────────────────────────────────────────
+  causalRepeatRow: { marginTop: 8, marginBottom: 4 },
+  causalRepeatBar: {
+    flexDirection: "row",
+    height: 8,
+    borderRadius: 4,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.05)",
+  },
+  causalRepeatSegment: { height: "100%" },
+  causalRepeatLegend: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 5,
+  },
+  causalRepeatChip: {
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    letterSpacing: 0.3,
+  },
+  causalSection: {
+    marginTop: 12,
+    marginBottom: 6,
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.text,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  causalCauseRow: {
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 6,
+  },
+  causalCauseTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 5,
+  },
+  causalCauseLabel: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  causalCauseRight: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  causalCauseTag: {
+    fontSize: 9,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.5,
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    marginRight: 6,
+  },
+  causalCauseValue: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+  },
+  causalCauseBarTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    overflow: "hidden",
+  },
+  causalCauseBarFill: { height: "100%", borderRadius: 2 },
+  causalLeanRow: {
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 6,
+  },
+  causalLeanTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 3,
+  },
+  causalLeanTitle: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  causalLeanValue: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  causalLeanReason: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 15,
+  },
+  causalShape: {
+    marginTop: 8,
+    backgroundColor: "rgba(168,85,247,0.08)",
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  causalShapeLabel: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: "#c4b5fd",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginBottom: 2,
+  },
+  causalShapeValue: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  causalMatchRow: {
+    backgroundColor: "rgba(255,255,255,0.025)",
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 6,
+  },
+  causalMatchTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  causalMatchResult: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    width: 14,
+  },
+  causalMatchScore: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    marginLeft: 6,
+  },
+  causalMatchOpp: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginLeft: 8,
+  },
+  causalMatchTag: {
+    fontSize: 9,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.4,
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  causalMatchPrimary: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+    marginTop: 2,
+  },
+  causalMatchReason: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    lineHeight: 15,
+    marginTop: 1,
+  },
+  causalSubRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginTop: 4,
+  },
+  causalSubChip: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.4,
+    width: 70,
+  },
+  causalSubReason: {
+    flex: 1,
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    lineHeight: 14,
   },
 });

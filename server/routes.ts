@@ -1822,6 +1822,348 @@ async function proxyImage(imageUrl: string, res: Response) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Causal Analysis — explicit "why did each result happen?" layer
+// ─────────────────────────────────────────────────────────────────────────
+
+type CausalCause =
+  | "DefensiveStructure"
+  | "TacticalDeadlock"
+  | "AttackingDominance"
+  | "ClinicalFinishing"
+  | "FinishingInefficiency"
+  | "OpponentWastefulness"
+  | "DefensiveCollapse"
+  | "LateDropOff"
+  | "EarlyShock"
+  | "GameStateControl"
+  | "OpponentClass";
+
+type Repeatability = "repeatable" | "variance" | "mixed";
+
+const CAUSE_LABEL: Record<CausalCause, string> = {
+  DefensiveStructure:    "Defensive structure",
+  TacticalDeadlock:      "Tactical deadlock",
+  AttackingDominance:    "Attacking dominance",
+  ClinicalFinishing:     "Clinical finishing",
+  FinishingInefficiency: "Finishing inefficiency",
+  OpponentWastefulness:  "Opponent wastefulness",
+  DefensiveCollapse:     "Defensive collapse",
+  LateDropOff:           "Late drop-off",
+  EarlyShock:            "Early shock",
+  GameStateControl:      "Game-state control",
+  OpponentClass:         "Outclassed by opponent",
+};
+
+const CAUSE_DEFAULT_REPEAT: Record<CausalCause, Repeatability> = {
+  DefensiveStructure: "repeatable",
+  TacticalDeadlock: "repeatable",
+  AttackingDominance: "repeatable",
+  ClinicalFinishing: "variance",
+  FinishingInefficiency: "variance",
+  OpponentWastefulness: "variance",
+  DefensiveCollapse: "variance",
+  LateDropOff: "mixed",
+  EarlyShock: "mixed",
+  GameStateControl: "repeatable",
+  OpponentClass: "repeatable",
+};
+
+type CausalMatch = {
+  eventId: number;
+  date: number;
+  opponent: string;
+  venue: "H" | "A";
+  scoreline: string;
+  result: "W" | "D" | "L";
+  primaryCause: CausalCause;
+  primaryLabel: string;
+  secondaryCauses: CausalCause[];
+  repeatability: Repeatability;
+  reason: string;
+  bttsHit: boolean;
+  bttsReason: string;
+  bttsRepeatability: Repeatability;
+  over25Hit: boolean;
+  ouReason: string;
+  ouRepeatability: Repeatability;
+};
+
+type CausalProfile = {
+  matchesAnalyzed: number;
+  causes: { cause: CausalCause; label: string; count: number; pct: number; repeatability: Repeatability }[];
+  repeatableShare: number;
+  varianceShare: number;
+  mixedShare: number;
+  bttsTrueRate: number | null;
+  bttsRepeatableShare: number | null;
+  over25TrueRate: number | null;
+  over25RepeatableShare: number | null;
+  topReasons: string[];
+  matches: CausalMatch[];
+  predictionLeans: {
+    btts: { lean: string; confidence: number; reason: string };
+    ou25: { lean: string; confidence: number; reason: string };
+    scorelineShape: string;
+  };
+  summary: string;
+};
+
+function classifyCausalMatch(s: MatchStory): CausalMatch {
+  const xgF = s.xgFor;
+  const xgA = s.xgAgainst;
+  const possession = s.possession ?? 50;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+
+  let primary: CausalCause;
+  let repeatability: Repeatability;
+  const secondaries: CausalCause[] = [];
+  let reason = "";
+
+  if (s.result === "W") {
+    if (xgF != null && s.goalsFor - xgF >= 0.7 && (s.bigChances ?? 0) <= 2) {
+      primary = "ClinicalFinishing"; repeatability = "variance";
+      reason = `Won by overperforming xG (+${r1(s.goalsFor - xgF)}) on limited chances`;
+    } else if (xgF != null && xgA != null && xgF >= 1.6 && xgF - xgA >= 0.6 && possession >= 53) {
+      primary = "AttackingDominance"; repeatability = "repeatable";
+      reason = `Controlled tempo and converted (xG ${r1(xgF)}–${r1(xgA)}, ${Math.round(possession)}% possession)`;
+    } else if (xgA != null && xgA <= 0.8 && s.goalsAgainst === 0) {
+      primary = "DefensiveStructure"; repeatability = "repeatable";
+      reason = `Clean sheet earned through defensive control (xGA ${r1(xgA)})`;
+    } else if (xgA != null && xgA >= 1.6 && s.goalsAgainst <= 1) {
+      primary = "OpponentWastefulness"; repeatability = "variance";
+      reason = `Opponent created ${r1(xgA)} xG but failed to punish`;
+    } else if (s.firstGoalMin != null && s.firstGoalMin >= 75) {
+      primary = "LateDropOff"; repeatability = "mixed";
+      reason = `Late winner (${s.firstGoalMin}′) decided a tight match`;
+      secondaries.push("ClinicalFinishing");
+    } else {
+      primary = "AttackingDominance"; repeatability = "mixed";
+      reason = `Win without a standout statistical signal — mixed factors`;
+    }
+  } else if (s.result === "D") {
+    if (s.goalsFor === 0 && s.goalsAgainst === 0) {
+      if (xgF != null && xgA != null && xgF <= 1.0 && xgA <= 1.0 && (s.shots ?? 12) <= 11) {
+        primary = "TacticalDeadlock"; repeatability = "repeatable";
+        reason = `Genuine stalemate — both sides ≤1.0 xG, chances neutralised`;
+      } else if (xgF != null && xgF >= 1.5) {
+        primary = "FinishingInefficiency"; repeatability = "variance";
+        reason = `Created ${r1(xgF)} xG but couldn't convert — finishing failure`;
+      } else if (xgA != null && xgA >= 1.5) {
+        primary = "OpponentWastefulness"; repeatability = "variance";
+        reason = `Bailed out — opponent missed ${r1(xgA)} xG of chances`;
+      } else {
+        primary = "TacticalDeadlock"; repeatability = "mixed";
+        reason = `Cagey goalless draw with limited chances either way`;
+      }
+    } else if (xgF != null && xgF - s.goalsFor >= 0.7) {
+      primary = "FinishingInefficiency"; repeatability = "variance";
+      reason = `Dropped points by underperforming xG (-${r1(xgF - s.goalsFor)})`;
+    } else if (s.firstConcMin != null && s.firstConcMin >= 75) {
+      primary = "LateDropOff"; repeatability = "mixed";
+      reason = `Conceded late (${s.firstConcMin}′) to drop points from a winning position`;
+    } else if (xgF != null && xgA != null && Math.abs(xgF - xgA) <= 0.4) {
+      primary = "TacticalDeadlock"; repeatability = "repeatable";
+      reason = `Even xG battle (${r1(xgF)}–${r1(xgA)}) ended fairly level`;
+    } else {
+      primary = "TacticalDeadlock"; repeatability = "mixed";
+      reason = `Honours-even contest`;
+    }
+  } else { // L
+    if (xgF != null && xgF - s.goalsFor >= 0.8 && xgF >= 1.4) {
+      primary = "FinishingInefficiency"; repeatability = "variance";
+      reason = `Lost despite ${r1(xgF)} xG created — punished for missed chances`;
+    } else if (xgA != null && s.goalsAgainst - xgA >= 0.7 && s.goalsAgainst >= 2) {
+      primary = "DefensiveCollapse"; repeatability = "variance";
+      reason = `Conceded ${s.goalsAgainst} on only ${r1(xgA)} xGA — clinical opponent`;
+    } else if (xgA != null && xgF != null && xgA - xgF >= 0.7 && possession <= 45) {
+      primary = "OpponentClass"; repeatability = "repeatable";
+      reason = `Outclassed across the board (xG ${r1(xgF)}–${r1(xgA)}, ${Math.round(possession)}% possession)`;
+    } else if (s.firstConcMin != null && s.firstConcMin >= 75 && (s.goalsFor + s.goalsAgainst) <= 2) {
+      primary = "LateDropOff"; repeatability = "mixed";
+      reason = `Lost to a late goal (${s.firstConcMin}′) in a tight game`;
+    } else if (s.firstConcMin != null && s.firstConcMin <= 15) {
+      primary = "EarlyShock"; repeatability = "mixed";
+      reason = `Conceded early (${s.firstConcMin}′) and never recovered`;
+    } else {
+      primary = "OpponentClass"; repeatability = "mixed";
+      reason = `Beaten by the better side on the day`;
+    }
+  }
+
+  // Secondary tags from narratives / signals
+  if (s.firstConcMin != null && s.firstConcMin <= 15 && primary !== "EarlyShock") secondaries.push("EarlyShock");
+  if (s.narratives.includes("blewLead")) secondaries.push("LateDropOff");
+  if (s.narratives.includes("comeback")) secondaries.push("GameStateControl");
+  if (s.narratives.includes("dominantWin") && primary !== "AttackingDominance") secondaries.push("GameStateControl");
+
+  // BTTS cause
+  const bttsHit = s.goalsFor > 0 && s.goalsAgainst > 0;
+  let bttsReason = ""; let bttsRep: Repeatability = "mixed";
+  if (bttsHit) {
+    const bothCreated = xgF != null && xgA != null && xgF >= 1.0 && xgA >= 1.0;
+    if (bothCreated) { bttsReason = "Both sides genuinely created (BTTS via chance creation)"; bttsRep = "repeatable"; }
+    else { bttsReason = "BTTS via finishing variance — at least one side scored from limited chances"; bttsRep = "variance"; }
+  } else if (s.goalsFor === 0 && s.goalsAgainst === 0) {
+    if (xgF != null && xgF >= 1.3) { bttsReason = "No-BTTS via own finishing failure"; bttsRep = "variance"; }
+    else { bttsReason = "No-BTTS via tactical stalemate (both sides quiet)"; bttsRep = "repeatable"; }
+  } else if (s.goalsAgainst === 0) {
+    if (xgA != null && xgA <= 0.9) { bttsReason = "Clean sheet earned through defensive control"; bttsRep = "repeatable"; }
+    else { bttsReason = "Clean sheet thanks to opponent wastefulness"; bttsRep = "variance"; }
+  } else { // s.goalsFor === 0
+    if (xgF != null && xgF >= 1.3) { bttsReason = "Failed to score despite creating — finishing failure"; bttsRep = "variance"; }
+    else { bttsReason = "Failed to score — chances were absent"; bttsRep = "repeatable"; }
+  }
+
+  // O/U 2.5 cause
+  const total = s.goalsFor + s.goalsAgainst;
+  const over25 = total >= 3;
+  const xgTotal = (xgF ?? 0) + (xgA ?? 0);
+  let ouReason = ""; let ouRep: Repeatability = "mixed";
+  if (over25) {
+    if (xgF != null && xgA != null && xgTotal >= 2.6) {
+      ouReason = `Open game by chances (combined xG ${r1(xgTotal)})`; ouRep = "repeatable";
+    } else {
+      ouReason = `Over 2.5 driven by finishing variance — chances scarce`; ouRep = "variance";
+    }
+  } else {
+    if (xgF != null && xgA != null && xgTotal <= 2.2) {
+      ouReason = `Low-event game (combined xG ${r1(xgTotal)})`; ouRep = "repeatable";
+    } else if (xgF != null && xgA != null && xgTotal >= 2.6) {
+      ouReason = `Under 2.5 via finishing failure — ${r1(xgTotal)} xG didn't convert`; ouRep = "variance";
+    } else {
+      ouReason = `Under 2.5 with mixed signals`; ouRep = "mixed";
+    }
+  }
+
+  return {
+    eventId: s.eventId,
+    date: s.date,
+    opponent: s.opponent,
+    venue: s.venue,
+    scoreline: `${s.goalsFor}–${s.goalsAgainst}`,
+    result: s.result,
+    primaryCause: primary,
+    primaryLabel: CAUSE_LABEL[primary],
+    secondaryCauses: Array.from(new Set(secondaries)),
+    repeatability,
+    reason,
+    bttsHit,
+    bttsReason,
+    bttsRepeatability: bttsRep,
+    over25Hit: over25,
+    ouReason,
+    ouRepeatability: ouRep,
+  };
+}
+
+function computeCausalAnalysis(patterns: ScoringPatterns): CausalProfile {
+  const matches = patterns.matchStories.map(classifyCausalMatch);
+  const N = matches.length;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+
+  // Cause counts
+  const counts = new Map<CausalCause, number>();
+  matches.forEach(m => counts.set(m.primaryCause, (counts.get(m.primaryCause) || 0) + 1));
+  const causes = Array.from(counts.entries())
+    .map(([cause, count]) => ({
+      cause, label: CAUSE_LABEL[cause], count, pct: pct(count, N),
+      repeatability: CAUSE_DEFAULT_REPEAT[cause],
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  // Repeatability shares
+  const rep = matches.filter(m => m.repeatability === "repeatable").length;
+  const variance = matches.filter(m => m.repeatability === "variance").length;
+  const mixed = matches.filter(m => m.repeatability === "mixed").length;
+
+  // BTTS / OU repeatable shares
+  const bttsHits = matches.filter(m => m.bttsHit).length;
+  const bttsRepeatable = matches.filter(m => m.bttsRepeatability === "repeatable").length;
+  const ouHits = matches.filter(m => m.over25Hit).length;
+  const ouRepeatable = matches.filter(m => m.ouRepeatability === "repeatable").length;
+
+  // Top human reasons (deduped, first 4)
+  const topReasons: string[] = [];
+  const seen = new Set<string>();
+  for (const m of matches) {
+    const key = m.primaryLabel + "|" + m.repeatability;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    topReasons.push(`${m.primaryLabel} (${m.repeatability}) — e.g. ${m.scoreline} vs ${m.opponent}: ${m.reason}`);
+    if (topReasons.length >= 4) break;
+  }
+
+  // ── Forward-looking leans ────────────────────────────────────────────
+  // BTTS lean: weight repeatable BTTS evidence over variance evidence
+  const bttsRepYes = matches.filter(m => m.bttsHit && m.bttsRepeatability === "repeatable").length;
+  const bttsRepNo  = matches.filter(m => !m.bttsHit && m.bttsRepeatability === "repeatable").length;
+  let bttsLean = "Toss-up", bttsConf = 0, bttsReason = "Insufficient repeatable signal";
+  if (bttsRepYes + bttsRepNo > 0) {
+    const yesShare = bttsRepYes / (bttsRepYes + bttsRepNo);
+    bttsConf = Math.round(Math.abs(yesShare - 0.5) * 200);
+    if (yesShare >= 0.7)      { bttsLean = "Yes";       bttsReason = `${bttsRepYes}/${bttsRepYes + bttsRepNo} repeatable BTTS-yes results — both sides regularly creating`; }
+    else if (yesShare >= 0.55){ bttsLean = "Lean Yes";  bttsReason = `Repeatable signal slightly favours BTTS (${bttsRepYes}/${bttsRepYes + bttsRepNo})`; }
+    else if (yesShare <= 0.3) { bttsLean = "No";        bttsReason = `${bttsRepNo}/${bttsRepYes + bttsRepNo} repeatable no-BTTS results — defensive control or low chance creation`; }
+    else if (yesShare <= 0.45){ bttsLean = "Lean No";   bttsReason = `Repeatable signal slightly favours no-BTTS (${bttsRepNo}/${bttsRepYes + bttsRepNo})`; }
+    else                      { bttsLean = "Toss-up";   bttsReason = "Repeatable evidence roughly even"; }
+  }
+
+  const ouRepOver  = matches.filter(m => m.over25Hit  && m.ouRepeatability === "repeatable").length;
+  const ouRepUnder = matches.filter(m => !m.over25Hit && m.ouRepeatability === "repeatable").length;
+  let ouLean = "Toss-up", ouConf = 0, ouReason = "Insufficient repeatable signal";
+  if (ouRepOver + ouRepUnder > 0) {
+    const overShare = ouRepOver / (ouRepOver + ouRepUnder);
+    ouConf = Math.round(Math.abs(overShare - 0.5) * 200);
+    if (overShare >= 0.7)       { ouLean = "Over";        ouReason = `${ouRepOver}/${ouRepOver + ouRepUnder} matches were genuine open games by chance creation`; }
+    else if (overShare >= 0.55) { ouLean = "Lean Over";   ouReason = `Repeatable signal slightly favours Over 2.5`; }
+    else if (overShare <= 0.3)  { ouLean = "Under";       ouReason = `${ouRepUnder}/${ouRepOver + ouRepUnder} matches were genuine low-event games`; }
+    else if (overShare <= 0.45) { ouLean = "Lean Under";  ouReason = `Repeatable signal slightly favours Under 2.5`; }
+    else                        { ouLean = "Toss-up";     ouReason = "Repeatable evidence roughly even"; }
+  }
+
+  // Scoreline shape
+  const xgFor = patterns.xgPerMatch;
+  const xgAg  = patterns.xgAgainstPerMatch;
+  const deadlockShare = pct(matches.filter(m => m.primaryCause === "TacticalDeadlock").length, N);
+  let shape = "Mixed-profile contest";
+  if (xgFor != null && xgAg != null) {
+    const tot = xgFor + xgAg;
+    if (tot <= 2.0 || deadlockShare >= 30) shape = "Cagey low-scoring profile (0-0 / 1-0 / 1-1 most likely)";
+    else if (tot >= 3.0)                   shape = "Open & high-scoring profile (2-1 / 2-2 / 3-1 in range)";
+    else                                   shape = "Balanced moderate-scoring profile (1-1 / 2-1 / 1-0 in range)";
+  }
+
+  // High-level summary
+  const repeatableShare = pct(rep, N);
+  const varianceShare   = pct(variance, N);
+  const dominantCause = causes[0]?.label ?? "—";
+  const summary =
+    `Last ${N} matches dominated by **${dominantCause.toLowerCase()}** (${causes[0]?.pct ?? 0}%). ` +
+    `${repeatableShare}% of results explained by repeatable causes, ${varianceShare}% by variance/luck.`;
+
+  return {
+    matchesAnalyzed: N,
+    causes,
+    repeatableShare,
+    varianceShare,
+    mixedShare: pct(mixed, N),
+    bttsTrueRate: pct(bttsHits, N),
+    bttsRepeatableShare: pct(bttsRepeatable, N),
+    over25TrueRate: pct(ouHits, N),
+    over25RepeatableShare: pct(ouRepeatable, N),
+    topReasons,
+    matches,
+    predictionLeans: {
+      btts: { lean: bttsLean, confidence: bttsConf, reason: bttsReason },
+      ou25: { lean: ouLean, confidence: ouConf, reason: ouReason },
+      scorelineShape: shape,
+    },
+    summary,
+  };
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   app.get(
     "/api/sport/:sport/scheduled-events/:date",
@@ -3167,6 +3509,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const homePatterns = computeScoringPatterns(homeLast15, homeTeamId, incidentsByEventId, statsByEventId, homeTeamMatchStats?.all?.avgXg ?? null);
         const awayPatterns = computeScoringPatterns(awayLast15, awayTeamId, incidentsByEventId, statsByEventId, awayTeamMatchStats?.all?.avgXg ?? null);
 
+        const homeCausal = computeCausalAnalysis(homePatterns);
+        const awayCausal = computeCausalAnalysis(awayPatterns);
+
         const homeSide = enrichSide("home", homeHistory, homeLast15, homeTeamId);
         const awaySide = enrichSide("away", awayHistory, awayLast15, awayTeamId);
 
@@ -3178,8 +3523,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const simulationInsights: SimulationInsights = { home: homeHidden, away: awayHidden, matchup: matchupCrossRefs };
 
         res.json({
-          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns },
-          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns },
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns, causalAnalysis: homeCausal },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns, causalAnalysis: awayCausal },
           simulationInsights,
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
