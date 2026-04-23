@@ -286,6 +286,36 @@ interface TeamMatchStats {
   matchesAnalyzed: number;
 }
 
+interface OpponentSelfProfile {
+  xg: number | null;
+  xga: number | null;
+  possession: number | null;
+  bigChances: number | null;
+  shotsOnTarget: number | null;
+}
+
+interface ComparableOpponent {
+  eventId: number;
+  opponentId: number;
+  opponentName: string;
+  venue: "H" | "A";
+  similarity: number;
+  teamScore: number;
+  oppScore: number;
+  result: "W" | "D" | "L";
+  oppXg: number | null;
+  oppXga: number | null;
+  oppPossession: number | null;
+  whyComparable: string;
+  startTimestamp: number;
+}
+
+interface AdjustedTeamMatchStats extends TeamMatchStats {
+  effectiveSampleSize: number;
+  currentOpponentProfile: OpponentSelfProfile;
+  comparableOpponents: ComparableOpponent[];
+}
+
 interface SimulationMetricsResponse {
   home?: {
     formation?: string | null;
@@ -309,6 +339,7 @@ interface SimulationMetricsResponse {
     activeLast5Count?: number;
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
+    teamMatchStatsAdjusted?: AdjustedTeamMatchStats;
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
     scoringPatterns?: ScoringPatterns | null;
@@ -336,6 +367,7 @@ interface SimulationMetricsResponse {
     activeLast5Count?: number;
     matchesAnalyzed?: number;
     teamMatchStats?: TeamMatchStats;
+    teamMatchStatsAdjusted?: AdjustedTeamMatchStats;
     gsrm?: GSRM | null;
     ssbi?: SSBI | null;
     scoringPatterns?: ScoringPatterns | null;
@@ -2234,36 +2266,56 @@ function HalfPatternMatchList({
   );
 }
 
+type StatMode = "raw" | "adjusted";
+
 function TeamStatsCard({
   homeTeamName,
   awayTeamName,
   homeStats,
   awayStats,
+  homeStatsAdjusted,
+  awayStatsAdjusted,
 }: {
   homeTeamName: string;
   awayTeamName: string;
   homeStats?: TeamMatchStats | null;
   awayStats?: TeamMatchStats | null;
+  homeStatsAdjusted?: AdjustedTeamMatchStats | null;
+  awayStatsAdjusted?: AdjustedTeamMatchStats | null;
 }) {
   const [period, setPeriod] = React.useState<StatViewPeriod>("all");
+  const [mode, setMode] = React.useState<StatMode>("raw");
 
   if (!homeStats && !awayStats) return null;
   const matchesAnalyzed = homeStats?.matchesAnalyzed || awayStats?.matchesAnalyzed || 0;
   if (matchesAnalyzed === 0) return null;
 
-  const homeP = period === "all" ? homeStats?.all : period === "firstHalf" ? homeStats?.firstHalf : homeStats?.secondHalf;
-  const awayP = period === "all" ? awayStats?.all : period === "firstHalf" ? awayStats?.firstHalf : awayStats?.secondHalf;
+  const useAdjusted = mode === "adjusted" && (!!homeStatsAdjusted || !!awayStatsAdjusted);
+  const homeSrc = useAdjusted ? homeStatsAdjusted : homeStats;
+  const awaySrc = useAdjusted ? awayStatsAdjusted : awayStats;
+
+  const homeP = period === "all" ? homeSrc?.all : period === "firstHalf" ? homeSrc?.firstHalf : homeSrc?.secondHalf;
+  const awayP = period === "all" ? awaySrc?.all : period === "firstHalf" ? awaySrc?.firstHalf : awaySrc?.secondHalf;
+
+  // Always grab the raw value as the comparison baseline when in adjusted mode
+  const homeRawP = period === "all" ? homeStats?.all : period === "firstHalf" ? homeStats?.firstHalf : homeStats?.secondHalf;
+  const awayRawP = period === "all" ? awayStats?.all : period === "firstHalf" ? awayStats?.firstHalf : awayStats?.secondHalf;
 
   const hasData = (homeP?.matchesWithStats || 0) > 0 || (awayP?.matchesWithStats || 0) > 0 ||
     (homeP?.avgGoalsScored != null) || (awayP?.avgGoalsScored != null);
 
   const rows = buildStatRows(homeP, awayP);
+  const rawRows = buildStatRows(homeRawP, awayRawP);
   const periodLabel = period === "all" ? "Full Match" : period === "firstHalf" ? "1st Half" : "2nd Half";
   const tabs: { key: StatViewPeriod; label: string }[] = [
     { key: "all", label: "Last 15" },
     { key: "firstHalf", label: "1st Half" },
     { key: "secondHalf", label: "2nd Half" },
   ];
+
+  const homeEss = homeStatsAdjusted?.effectiveSampleSize;
+  const awayEss = awayStatsAdjusted?.effectiveSampleSize;
+  const adjustedAvailable = !!homeStatsAdjusted || !!awayStatsAdjusted;
 
   return (
     <View style={styles.phaseCard}>
@@ -2284,27 +2336,75 @@ function TeamStatsCard({
           </TouchableOpacity>
         ))}
       </View>
+      {adjustedAvailable && (
+        <View style={styles.modeToggle}>
+          <TouchableOpacity
+            style={[styles.modeTab, mode === "raw" && styles.modeTabActive]}
+            onPress={() => setMode("raw")}
+            activeOpacity={0.75}
+          >
+            <Text style={[styles.modeTabText, mode === "raw" && styles.modeTabTextActive]}>Raw avg</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeTab, mode === "adjusted" && styles.modeTabActive]}
+            onPress={() => setMode("adjusted")}
+            activeOpacity={0.75}
+          >
+            <Text style={[styles.modeTabText, mode === "adjusted" && styles.modeTabTextActive]}>vs Comparable</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {mode === "adjusted" && (
+        <Text style={styles.modeCaption}>
+          Each past match weighted by how closely that opponent's performance matched {awayTeamName}/{homeTeamName}'s typical profile.
+          {typeof homeEss === "number" && typeof awayEss === "number"
+            ? `  Effective sample: ${homeEss.toFixed(1)} / ${awayEss.toFixed(1)} of ${matchesAnalyzed}.`
+            : ""}
+        </Text>
+      )}
       {!hasData ? (
         <Text style={styles.statsNoData}>No {periodLabel.toLowerCase()} statistics available for these matches.</Text>
       ) : (
         <>
           <View style={styles.statsHeaderRow}>
             <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
-            <Text style={styles.statsHeaderLabel}>Avg {periodLabel}</Text>
+            <Text style={styles.statsHeaderLabel}>{mode === "adjusted" ? `vs Comparable` : `Avg ${periodLabel}`}</Text>
             <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
           </View>
           {rows.map((row, index) => {
             const colors = statColor(row.homeVal, row.awayVal, row.higherIsBetter);
             if (row.homeVal == null && row.awayVal == null && !row.section) return null;
+            const rawRow = rawRows[index];
+            const showDelta = mode === "adjusted" && rawRow;
+            const homeDelta = showDelta && rawRow.homeVal != null && row.homeVal != null
+              ? Math.round((row.homeVal - rawRow.homeVal) * 10) / 10
+              : null;
+            const awayDelta = showDelta && rawRow.awayVal != null && row.awayVal != null
+              ? Math.round((row.awayVal - rawRow.awayVal) * 10) / 10
+              : null;
             return (
               <View key={`${row.label}-${index}`}>
                 {row.section && (
                   <Text style={styles.statsSectionLabel}>{row.section}</Text>
                 )}
                 <View style={styles.statsRow}>
-                  <Text style={[styles.statsValue, { color: colors.home }]}>{fmt(row.homeVal, row.unit)}</Text>
+                  <View style={styles.statsCellLeft}>
+                    <Text style={[styles.statsValue, { color: colors.home }]}>{fmt(row.homeVal, row.unit)}</Text>
+                    {homeDelta !== null && homeDelta !== 0 && (
+                      <Text style={[styles.statsDelta, { color: deltaColor(homeDelta, row.higherIsBetter) }]}>
+                        {homeDelta > 0 ? "+" : ""}{homeDelta}{row.unit || ""}
+                      </Text>
+                    )}
+                  </View>
                   <Text style={styles.statsLabel}>{row.label}</Text>
-                  <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{fmt(row.awayVal, row.unit)}</Text>
+                  <View style={styles.statsCellRight}>
+                    {awayDelta !== null && awayDelta !== 0 && (
+                      <Text style={[styles.statsDelta, { color: deltaColor(awayDelta, row.higherIsBetter) }]}>
+                        {awayDelta > 0 ? "+" : ""}{awayDelta}{row.unit || ""}
+                      </Text>
+                    )}
+                    <Text style={[styles.statsValue, { color: colors.away, textAlign: "right" }]}>{fmt(row.awayVal, row.unit)}</Text>
+                  </View>
                 </View>
               </View>
             );
@@ -2313,6 +2413,86 @@ function TeamStatsCard({
       )}
     </View>
   );
+}
+
+function deltaColor(delta: number, higherIsBetter: boolean): string {
+  if (delta === 0) return Colors.dark.textSecondary;
+  const better = higherIsBetter ? delta > 0 : delta < 0;
+  return better ? "#22c55e" : "#ef4444";
+}
+
+function ComparableOpponentsCard({
+  homeTeamName,
+  awayTeamName,
+  homeAdjusted,
+  awayAdjusted,
+}: {
+  homeTeamName: string;
+  awayTeamName: string;
+  homeAdjusted?: AdjustedTeamMatchStats | null;
+  awayAdjusted?: AdjustedTeamMatchStats | null;
+}) {
+  if (!homeAdjusted && !awayAdjusted) return null;
+  const homeList = (homeAdjusted?.comparableOpponents || []).slice(0, 3);
+  const awayList = (awayAdjusted?.comparableOpponents || []).slice(0, 3);
+  if (homeList.length === 0 && awayList.length === 0) return null;
+
+  const renderTeamBlock = (
+    sideName: string,
+    oppName: string,
+    color: string,
+    list: ComparableOpponent[],
+    profile?: OpponentSelfProfile,
+  ) => (
+    <View style={styles.comparableTeamBlock}>
+      <Text style={[styles.comparableTeamHeader, { color }]} numberOfLines={1}>
+        {sideName}'s 3 most {oppName}-like past opponents
+      </Text>
+      {profile && (
+        <Text style={styles.comparableProfileLine}>
+          {oppName} avg profile: xG {fmtNum(profile.xg)} · xGA {fmtNum(profile.xga)} · poss {fmtNum(profile.possession)}% · BC {fmtNum(profile.bigChances)}
+        </Text>
+      )}
+      {list.length === 0 ? (
+        <Text style={styles.statsNoData}>No comparable opponents found.</Text>
+      ) : list.map((c) => {
+        const resultColor = c.result === "W" ? "#22c55e" : c.result === "L" ? "#ef4444" : Colors.dark.textSecondary;
+        return (
+          <View key={c.eventId} style={styles.comparableRow}>
+            <View style={styles.comparableHeadRow}>
+              <Text style={styles.comparableVenue}>{c.venue}</Text>
+              <Text style={styles.comparableOpp} numberOfLines={1}>{c.opponentName}</Text>
+              <Text style={[styles.comparableResult, { color: resultColor }]}>
+                {c.result} {c.teamScore}-{c.oppScore}
+              </Text>
+              <Text style={styles.comparableSim}>{Math.round(c.similarity * 100)}%</Text>
+            </View>
+            <Text style={styles.comparableMeta}>
+              opp xG {fmtNum(c.oppXg)} · opp xGA {fmtNum(c.oppXga)} · opp poss {fmtNum(c.oppPossession)}%
+            </Text>
+            <Text style={styles.comparableWhy}>{c.whyComparable}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Closest past matchups · opponent quality match</Text>
+      <Text style={styles.modeCaption}>
+        Past opponents whose performance most resembled the current opponent's typical profile, with the actual scoreline that resulted.
+      </Text>
+      {renderTeamBlock(homeTeamName, awayTeamName, Colors.dark.homeKit, homeList, homeAdjusted?.currentOpponentProfile)}
+      <View style={styles.comparableDivider} />
+      {renderTeamBlock(awayTeamName, homeTeamName, Colors.dark.awayKit, awayList, awayAdjusted?.currentOpponentProfile)}
+    </View>
+  );
+}
+
+function fmtNum(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return (Math.round(v * 10) / 10).toString();
 }
 
 function FormStrengthCard({
@@ -2557,6 +2737,15 @@ function StadiumSimulationTab({
         awayTeamName={awayTeamName}
         homeStats={simulationMetrics?.home?.teamMatchStats}
         awayStats={simulationMetrics?.away?.teamMatchStats}
+        homeStatsAdjusted={simulationMetrics?.home?.teamMatchStatsAdjusted}
+        awayStatsAdjusted={simulationMetrics?.away?.teamMatchStatsAdjusted}
+      />
+
+      <ComparableOpponentsCard
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        homeAdjusted={simulationMetrics?.home?.teamMatchStatsAdjusted}
+        awayAdjusted={simulationMetrics?.away?.teamMatchStatsAdjusted}
       />
 
       <SimChatCard
@@ -3392,6 +3581,125 @@ const styles = StyleSheet.create({
   },
   periodTabTextActive: {
     color: Colors.dark.text,
+  },
+  modeToggle: {
+    flexDirection: "row",
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  modeTab: {
+    flex: 1,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+  },
+  modeTabActive: {
+    backgroundColor: "rgba(96,165,250,0.18)",
+    borderColor: "rgba(96,165,250,0.45)",
+  },
+  modeTabText: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+  },
+  modeTabTextActive: {
+    color: Colors.dark.text,
+  },
+  modeCaption: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    lineHeight: 15,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  statsCellLeft: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 6,
+  },
+  statsCellRight: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "flex-end",
+    gap: 6,
+  },
+  statsDelta: {
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+  },
+  comparableTeamBlock: {
+    marginTop: 10,
+  },
+  comparableTeamHeader: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    marginBottom: 4,
+  },
+  comparableProfileLine: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginBottom: 8,
+  },
+  comparableRow: {
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  comparableHeadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 2,
+  },
+  comparableVenue: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    color: Colors.dark.textSecondary,
+    width: 14,
+  },
+  comparableOpp: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.text,
+  },
+  comparableResult: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  comparableSim: {
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.dark.textSecondary,
+    minWidth: 36,
+    textAlign: "right",
+  },
+  comparableMeta: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textTertiary,
+    marginTop: 2,
+  },
+  comparableWhy: {
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+    marginTop: 2,
+    fontStyle: "italic",
+  },
+  comparableDivider: {
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    marginVertical: 12,
   },
   statsNoData: {
     fontSize: 12,

@@ -2886,6 +2886,411 @@ export async function registerRoutes(app: Express): Promise<Server> {
           };
         }
 
+        // ── Opponent-quality-weighted Team Match Stats ───────────────────────────
+        // For each past match, weight it by how much that opponent's performance
+        // resembled the *current* opponent's typical performance. Past matches vs
+        // unlike opponents barely count; past matches vs Leeds-like opponents count
+        // heavily.
+
+        type OppPerfProfile = {
+          xg: number | null;             // opponent's attacking output that match
+          xga: number | null;            // opponent's xG conceded that match (= team's xG)
+          possession: number | null;     // opponent's possession that match
+          bigChances: number | null;
+          shotsOnTarget: number | null;
+        };
+
+        type TeamSelfProfile = {
+          xg: number | null;             // team's avg attacking output / match
+          xga: number | null;            // team's avg xG conceded / match
+          possession: number | null;
+          bigChances: number | null;
+          shotsOnTarget: number | null;
+        };
+
+        function extractTeamSelfMatchProfile(event: any, teamId: number): TeamSelfProfile | null {
+          const isHome = event.homeTeam?.id === teamId;
+          const isAway = event.awayTeam?.id === teamId;
+          if (!isHome && !isAway) return null;
+          const teamSide: "home" | "away" = isHome ? "home" : "away";
+          const oppSide: "home" | "away" = isHome ? "away" : "home";
+          const statsData = statsByEventId.get(event.id);
+          if (!statsData) return null;
+          const teamRaw = extractPeriodStats(statsData, teamSide, "ALL");
+          const oppRaw = extractPeriodStats(statsData, oppSide, "ALL");
+          if (Object.keys(teamRaw).length === 0 || Object.keys(oppRaw).length === 0) return null;
+          const pick = (s: Record<string, number>, keys: string[]): number | null => {
+            for (const k of keys) {
+              const found = Object.keys(s).find((name) => name === k || name.includes(k));
+              if (found !== undefined) return s[found];
+            }
+            return null;
+          };
+          const teamShots = pick(teamRaw, ["total shots", "shots total"]);
+          const teamBC = pick(teamRaw, ["big chances"]);
+          const teamSoT = pick(teamRaw, ["shots on target"]);
+          const teamBlocked = pick(teamRaw, ["blocked shots"]);
+          const oppShots = pick(oppRaw, ["total shots", "shots total"]);
+          const oppBC = pick(oppRaw, ["big chances"]);
+          const oppSoT = pick(oppRaw, ["shots on target"]);
+          const oppBlocked = pick(oppRaw, ["blocked shots"]);
+          const teamXg = calculateCustomXG(teamShots, teamBC, teamSoT, teamBlocked, oppShots, oppBC);
+          const oppXg = calculateCustomXG(oppShots, oppBC, oppSoT, oppBlocked, teamShots, teamBC);
+          return {
+            xg: teamXg,
+            xga: oppXg,
+            possession: pick(teamRaw, ["ball possession"]),
+            bigChances: teamBC,
+            shotsOnTarget: teamSoT,
+          };
+        }
+
+        function extractOpponentPerfProfile(event: any, teamId: number): OppPerfProfile | null {
+          // Opponent's performance that match = team's "self" profile flipped.
+          const isHome = event.homeTeam?.id === teamId;
+          const isAway = event.awayTeam?.id === teamId;
+          if (!isHome && !isAway) return null;
+          // We want the OPP team's perspective; reuse extractTeamSelfMatchProfile by passing opp id.
+          const oppTeamId = isHome ? event.awayTeam?.id : event.homeTeam?.id;
+          if (!oppTeamId) return null;
+          const oppSelf = extractTeamSelfMatchProfile(event, oppTeamId);
+          if (!oppSelf) return null;
+          return {
+            xg: oppSelf.xg,
+            xga: oppSelf.xga,
+            possession: oppSelf.possession,
+            bigChances: oppSelf.bigChances,
+            shotsOnTarget: oppSelf.shotsOnTarget,
+          };
+        }
+
+        function computeTeamSelfAvgProfile(events: any[], teamId: number): TeamSelfProfile {
+          const profiles: TeamSelfProfile[] = [];
+          events.forEach((ev) => {
+            const p = extractTeamSelfMatchProfile(ev, teamId);
+            if (p) profiles.push(p);
+          });
+          const avg = (vals: (number | null)[]): number | null => {
+            const nums = vals.filter((v): v is number => v !== null && Number.isFinite(v));
+            return nums.length > 0 ? nums.reduce((s, v) => s + v, 0) / nums.length : null;
+          };
+          return {
+            xg: avg(profiles.map((p) => p.xg)),
+            xga: avg(profiles.map((p) => p.xga)),
+            possession: avg(profiles.map((p) => p.possession)),
+            bigChances: avg(profiles.map((p) => p.bigChances)),
+            shotsOnTarget: avg(profiles.map((p) => p.shotsOnTarget)),
+          };
+        }
+
+        function similarityBetween(past: OppPerfProfile, current: TeamSelfProfile): { score: number; axes: Record<string, number> } {
+          // Gaussian similarity per axis, weighted blend.
+          const axes = [
+            { key: "xg" as const, scale: 0.7, weight: 1.0 },
+            { key: "xga" as const, scale: 0.7, weight: 1.0 },
+            { key: "possession" as const, scale: 8, weight: 0.5 },
+            { key: "bigChances" as const, scale: 1.5, weight: 0.6 },
+            { key: "shotsOnTarget" as const, scale: 2, weight: 0.4 },
+          ];
+          let totalW = 0;
+          let weightedSum = 0;
+          const perAxis: Record<string, number> = {};
+          for (const a of axes) {
+            const pv = past[a.key];
+            const cv = current[a.key];
+            if (pv === null || cv === null) continue;
+            const diff = (pv - cv) / a.scale;
+            const sim = Math.exp(-(diff * diff) / 2);
+            perAxis[a.key] = sim;
+            weightedSum += sim * a.weight;
+            totalW += a.weight;
+          }
+          return { score: totalW > 0 ? weightedSum / totalW : 0, axes: perAxis };
+        }
+
+        function buildEventWeights(events: any[], teamId: number, currentOppProfile: TeamSelfProfile): Map<number, number> {
+          const weights = new Map<number, number>();
+          for (const ev of events) {
+            const oppPerf = extractOpponentPerfProfile(ev, teamId);
+            if (!oppPerf) {
+              weights.set(ev.id, 0);
+              continue;
+            }
+            const { score } = similarityBetween(oppPerf, currentOppProfile);
+            // Floor at small value so a few completely unlike matches don't go full-zero
+            // (preserves a tiny baseline signal)
+            weights.set(ev.id, Math.max(0.05, score));
+          }
+          return weights;
+        }
+
+        function buildWeightedPeriodSamples(
+          events: any[],
+          teamId: number,
+          period: "ALL" | "1ST" | "2ND",
+          goalScoreKey: "full" | "period1" | "period2",
+          weights: Map<number, number>,
+        ): {
+          samples: Record<string, { val: number; w: number }[]>;
+          goalScored: { val: number; w: number }[];
+          goalConceded: { val: number; w: number }[];
+          matchesWithStats: number;
+          effectiveSampleSize: number;
+        } {
+          const samples: Record<string, { val: number; w: number }[]> = {};
+          const goalScored: { val: number; w: number }[] = [];
+          const goalConceded: { val: number; w: number }[] = [];
+          let matchesWithStats = 0;
+          let effectiveSampleSize = 0;
+
+          const addS = (key: string, val: number | null, w: number) => {
+            if (val !== null && w > 0) {
+              if (!samples[key]) samples[key] = [];
+              samples[key].push({ val, w });
+            }
+          };
+
+          const readGoalScore = (score: any): number | null => {
+            if (goalScoreKey === "full") {
+              const v = Number(score?.current ?? score?.display ?? score?.normaltime);
+              return Number.isFinite(v) ? v : null;
+            }
+            const v = Number(score?.[goalScoreKey]);
+            return Number.isFinite(v) ? v : null;
+          };
+
+          events.forEach((event: any) => {
+            const isHome = event.homeTeam?.id === teamId;
+            const isAway = event.awayTeam?.id === teamId;
+            if (!isHome && !isAway) return;
+            const w = weights.get(event.id) ?? 0;
+            const side: "home" | "away" = isHome ? "home" : "away";
+            const oppSide: "home" | "away" = isHome ? "away" : "home";
+            const teamGoals = readGoalScore(isHome ? event.homeScore : event.awayScore);
+            const oppGoals = readGoalScore(isHome ? event.awayScore : event.homeScore);
+            if (teamGoals !== null) goalScored.push({ val: teamGoals, w });
+            if (oppGoals !== null) goalConceded.push({ val: oppGoals, w });
+
+            const statsData = statsByEventId.get(event.id);
+            if (!statsData) return;
+            const s = extractPeriodStats(statsData, side, period);
+            if (Object.keys(s).length === 0) return;
+            matchesWithStats += 1;
+            effectiveSampleSize += w;
+            const get = (keys: string[]): number | null => {
+              for (const k of keys) {
+                const found = Object.keys(s).find((name) => name === k || name.includes(k));
+                if (found !== undefined) return s[found];
+              }
+              return null;
+            };
+            const opp = extractPeriodStats(statsData, oppSide, period);
+            const oppGet = (keys: string[]): number | null => {
+              for (const k of keys) {
+                const found = Object.keys(opp).find((name) => name === k || name.includes(k));
+                if (found !== undefined) return opp[found];
+              }
+              return null;
+            };
+            addS("possession", get(["ball possession"]), w);
+            const customXG = calculateCustomXG(
+              get(["total shots", "shots total"]),
+              get(["big chances"]),
+              get(["shots on target"]),
+              get(["blocked shots"]),
+              oppGet(["total shots", "shots total"]),
+              oppGet(["big chances"]),
+            );
+            addS("xg", customXG, w);
+            if (customXG !== null && teamGoals !== null) {
+              const resultFactor = (oppGoals !== null && teamGoals > oppGoals) ? 1.05
+                : (oppGoals !== null && teamGoals === oppGoals) ? 1.00 : 0.95;
+              const xgGot = (0.7 * customXG + 0.3 * teamGoals) * resultFactor;
+              addS("xgGotPerMatch", Math.round(xgGot * 100) / 100, w);
+            }
+            addS("bigChances", get(["big chances"]), w);
+            addS("totalShots", get(["total shots", "shots total"]), w);
+            addS("shotsOnTarget", get(["shots on target"]), w);
+            addS("shotsOffTarget", get(["shots off target"]), w);
+            addS("blockedShots", get(["blocked shots"]), w);
+            addS("shotsInsideBox", get(["shots inside box"]), w);
+            addS("bigChancesScored", get(["big chances scored"]), w);
+            addS("bigChancesMissed", get(["big chances missed"]), w);
+            addS("cornerKicks", get(["corner kicks"]), w);
+            addS("goalkeeperSaves", get(["goalkeeper saves"]), w);
+            addS("goalsPrevented", get(["goals prevented"]), w);
+            const directPassAcc = get(["pass accuracy", "passes %", "accurate passes %"]);
+            const accuratePassesCount = get(["accurate passes"]);
+            const totalPassesCount = get(["total passes", "passes"]);
+            if (directPassAcc !== null) {
+              addS("passAccuracy", directPassAcc, w);
+            } else if (accuratePassesCount !== null && totalPassesCount !== null && totalPassesCount > 0) {
+              addS("passAccuracy", Math.round((accuratePassesCount / totalPassesCount) * 1000) / 10, w);
+            }
+            addS("totalPasses", totalPassesCount, w);
+            addS("tacklesWon", get(["tackles won", "tackles %", "tackles won %"]), w);
+            addS("interceptions", get(["interceptions"]), w);
+            addS("clearances", get(["clearances"]), w);
+            addS("fouls", get(["fouls"]), w);
+            addS("touchesOpBox", get(["touches in opposition box", "touches in opp. box"]), w);
+            addS("duelsWon", get(["total duels won", "duels won", "duels %", "duels"]), w);
+          });
+
+          return { samples, goalScored, goalConceded, matchesWithStats, effectiveSampleSize };
+        }
+
+        function weightedAvg(vals: { val: number; w: number }[]): number | null {
+          let totalW = 0;
+          let sum = 0;
+          for (const { val, w } of vals) {
+            sum += val * w;
+            totalW += w;
+          }
+          return totalW > 0 ? round1(sum / totalW) : null;
+        }
+
+        function periodStatsToPeriodStatsWeighted(
+          events: any[],
+          teamId: number,
+          period: "ALL" | "1ST" | "2ND",
+          goalScoreKey: "full" | "period1" | "period2",
+          weights: Map<number, number>,
+        ): PeriodStats {
+          const { samples, goalScored, goalConceded, matchesWithStats } = buildWeightedPeriodSamples(
+            events, teamId, period, goalScoreKey, weights,
+          );
+          const wAvg = (key: string): number | null => weightedAvg(samples[key] || []);
+          return {
+            avgGoalsScored: weightedAvg(goalScored),
+            avgGoalsConceded: weightedAvg(goalConceded),
+            avgPossession: wAvg("possession"),
+            avgXg: wAvg("xg"),
+            avgBigChances: wAvg("bigChances"),
+            avgTotalShots: wAvg("totalShots"),
+            avgShotsOnTarget: wAvg("shotsOnTarget"),
+            avgShotsOffTarget: wAvg("shotsOffTarget"),
+            avgBlockedShots: wAvg("blockedShots"),
+            avgShotsInsideBox: wAvg("shotsInsideBox"),
+            avgBigChancesScored: wAvg("bigChancesScored"),
+            avgBigChancesMissed: wAvg("bigChancesMissed"),
+            avgCornerKicks: wAvg("cornerKicks"),
+            avgGoalkeeperSaves: wAvg("goalkeeperSaves"),
+            avgGoalsPrevented: wAvg("goalsPrevented"),
+            avgPassAccuracy: wAvg("passAccuracy"),
+            avgTacklesWon: wAvg("tacklesWon"),
+            avgInterceptions: wAvg("interceptions"),
+            avgClearances: wAvg("clearances"),
+            avgFouls: wAvg("fouls"),
+            avgTotalPasses: wAvg("totalPasses"),
+            avgTouchesInOppositionBox: wAvg("touchesOpBox"),
+            avgDuelsWon: wAvg("duelsWon"),
+            avgXgGotPerMatch: wAvg("xgGotPerMatch"),
+            matchesWithStats,
+          };
+        }
+
+        type ComparableOpponent = {
+          eventId: number;
+          opponentId: number;
+          opponentName: string;
+          venue: "H" | "A";
+          similarity: number;
+          teamScore: number;
+          oppScore: number;
+          result: "W" | "D" | "L";
+          oppXg: number | null;
+          oppXga: number | null;
+          oppPossession: number | null;
+          whyComparable: string;
+          startTimestamp: number;
+        };
+
+        function buildComparableOpponents(
+          events: any[],
+          teamId: number,
+          currentOpp: TeamSelfProfile,
+          weights: Map<number, number>,
+          currentOppName: string,
+        ): ComparableOpponent[] {
+          const items: ComparableOpponent[] = [];
+          for (const ev of events) {
+            const isHome = ev.homeTeam?.id === teamId;
+            const isAway = ev.awayTeam?.id === teamId;
+            if (!isHome && !isAway) continue;
+            const oppPerf = extractOpponentPerfProfile(ev, teamId);
+            if (!oppPerf) continue;
+            const sim = weights.get(ev.id) ?? 0;
+            if (sim < 0.1) continue;
+            const teamGoals = Number(isHome ? ev.homeScore?.current : ev.awayScore?.current);
+            const oppGoals = Number(isHome ? ev.awayScore?.current : ev.homeScore?.current);
+            if (!Number.isFinite(teamGoals) || !Number.isFinite(oppGoals)) continue;
+            const opp = isHome ? ev.awayTeam : ev.homeTeam;
+
+            // Build why-comparable string from the most-aligned axes
+            const { axes } = similarityBetween(oppPerf, currentOpp);
+            const labelFor = (k: string) => {
+              switch (k) {
+                case "xg": return "attacking output";
+                case "xga": return "defensive concession";
+                case "possession": return "possession style";
+                case "bigChances": return "big-chance creation";
+                case "shotsOnTarget": return "shots on target";
+                default: return k;
+              }
+            };
+            const top = Object.entries(axes)
+              .sort(([, a], [, b]) => b - a)
+              .slice(0, 2)
+              .map(([k]) => labelFor(k));
+            const why = top.length > 0
+              ? `Matched ${currentOppName} on ${top.join(" & ")}`
+              : `Similar overall profile to ${currentOppName}`;
+
+            items.push({
+              eventId: ev.id,
+              opponentId: opp?.id ?? 0,
+              opponentName: opp?.shortName || opp?.name || "Opponent",
+              venue: isHome ? "H" : "A",
+              similarity: Math.round(sim * 100) / 100,
+              teamScore: teamGoals,
+              oppScore: oppGoals,
+              result: teamGoals > oppGoals ? "W" : teamGoals === oppGoals ? "D" : "L",
+              oppXg: oppPerf.xg !== null ? Math.round(oppPerf.xg * 10) / 10 : null,
+              oppXga: oppPerf.xga !== null ? Math.round(oppPerf.xga * 10) / 10 : null,
+              oppPossession: oppPerf.possession !== null ? Math.round(oppPerf.possession) : null,
+              whyComparable: why,
+              startTimestamp: Number(ev.startTimestamp) || 0,
+            });
+          }
+          items.sort((a, b) => b.similarity - a.similarity);
+          return items.slice(0, 5);
+        }
+
+        type AdjustedTeamMatchStats = TeamMatchStats & {
+          effectiveSampleSize: number;
+          currentOpponentProfile: TeamSelfProfile;
+          comparableOpponents: ComparableOpponent[];
+        };
+
+        function computeAdjustedTeamMatchStats(
+          events: any[],
+          teamId: number,
+          currentOpp: TeamSelfProfile,
+          currentOppName: string,
+        ): AdjustedTeamMatchStats {
+          const weights = buildEventWeights(events, teamId, currentOpp);
+          const ess = Array.from(weights.values()).reduce((s, v) => s + v, 0);
+          return {
+            all: periodStatsToPeriodStatsWeighted(events, teamId, "ALL", "full", weights),
+            firstHalf: periodStatsToPeriodStatsWeighted(events, teamId, "1ST", "period1", weights),
+            secondHalf: periodStatsToPeriodStatsWeighted(events, teamId, "2ND", "period2", weights),
+            matchesAnalyzed: events.length,
+            effectiveSampleSize: Math.round(ess * 10) / 10,
+            currentOpponentProfile: currentOpp,
+            comparableOpponents: buildComparableOpponents(events, teamId, currentOpp, weights, currentOppName),
+          };
+        }
+
         type PlayerHistory = {
           playerId: number;
           name: string;
@@ -3490,6 +3895,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const awayHistory = collectTeamHistory(awayLast15, awayTeamId);
         const homeTeamMatchStats = computeTeamMatchStats(homeLast15, homeTeamId);
         const awayTeamMatchStats = computeTeamMatchStats(awayLast15, awayTeamId);
+
+        // Opponent-quality-weighted stats: each team's past matches re-weighted
+        // by similarity of past opponent's performance to current opponent's avg.
+        const homeCurrentOppProfile = computeTeamSelfAvgProfile(awayLast15, awayTeamId);
+        const awayCurrentOppProfile = computeTeamSelfAvgProfile(homeLast15, homeTeamId);
+        const homeCurrentOppName = currentEvent?.awayTeam?.shortName || currentEvent?.awayTeam?.name || "the opponent";
+        const awayCurrentOppName = currentEvent?.homeTeam?.shortName || currentEvent?.homeTeam?.name || "the opponent";
+        const homeTeamMatchStatsAdjusted = computeAdjustedTeamMatchStats(homeLast15, homeTeamId, homeCurrentOppProfile, homeCurrentOppName);
+        const awayTeamMatchStatsAdjusted = computeAdjustedTeamMatchStats(awayLast15, awayTeamId, awayCurrentOppProfile, awayCurrentOppName);
         const homeGSRM = computeGSRM(homeLast15, homeTeamId, incidentsByEventId);
         const awayGSRM = computeGSRM(awayLast15, awayTeamId, incidentsByEventId);
 
@@ -3523,8 +3937,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const simulationInsights: SimulationInsights = { home: homeHidden, away: awayHidden, matchup: matchupCrossRefs };
 
         res.json({
-          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns, causalAnalysis: homeCausal },
-          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns, causalAnalysis: awayCausal },
+          home: { ...homeSide, teamMatchStats: homeTeamMatchStats, teamMatchStatsAdjusted: homeTeamMatchStatsAdjusted, gsrm: homeGSRM, ssbi: homeSSBI, scoringPatterns: homePatterns, causalAnalysis: homeCausal },
+          away: { ...awaySide, teamMatchStats: awayTeamMatchStats, teamMatchStatsAdjusted: awayTeamMatchStatsAdjusted, gsrm: awayGSRM, ssbi: awaySSBI, scoringPatterns: awayPatterns, causalAnalysis: awayCausal },
           simulationInsights,
           confirmed: currentLineups?.confirmed ?? null,
           source: "last_15_role_based_lineup_statistics_with_likely_lineup_fallback",
