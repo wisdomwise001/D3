@@ -2032,6 +2032,295 @@ interface HalfPatternResponse {
   matches: HalfPatternMatch[];
 }
 
+function HighestScoringHalfCard({
+  eventId,
+  homeTeamId,
+  awayTeamId,
+  homeTeamName,
+  awayTeamName,
+  simulationMetrics,
+}: {
+  eventId: number;
+  homeTeamId: number;
+  awayTeamId: number;
+  homeTeamName: string;
+  awayTeamName: string;
+  simulationMetrics?: SimulationMetricsResponse | null;
+}) {
+  const exclude = eventId ? `&excludeEventId=${eventId}` : "";
+  const homeHP = useQuery<HalfPatternResponse>({
+    queryKey: ["/api/team", homeTeamId, `half-patterns?n=7${exclude}`],
+    enabled: !!homeTeamId,
+  });
+  const awayHP = useQuery<HalfPatternResponse>({
+    queryKey: ["/api/team", awayTeamId, `half-patterns?n=7${exclude}`],
+    enabled: !!awayTeamId,
+  });
+
+  if (homeHP.isLoading || awayHP.isLoading) {
+    return (
+      <View style={styles.phaseCard}>
+        <Text style={styles.cardLabel}>Highest scoring half · prediction</Text>
+        <ActivityIndicator size="small" color={Colors.dark.accent} />
+      </View>
+    );
+  }
+
+  const homeRaw = simulationMetrics?.home?.teamMatchStats;
+  const homeAdj = simulationMetrics?.home?.teamMatchStatsAdjusted;
+  const awayRaw = simulationMetrics?.away?.teamMatchStats;
+  const awayAdj = simulationMetrics?.away?.teamMatchStatsAdjusted;
+  const homeHpD = homeHP.data;
+  const awayHpD = awayHP.data;
+
+  if (!homeRaw && !awayRaw && !homeHpD && !awayHpD) return null;
+
+  const avgN = (...vals: (number | null | undefined)[]): number => {
+    const nums = vals.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    return nums.length > 0 ? nums.reduce((s, v) => s + v, 0) / nums.length : 0;
+  };
+
+  // Build per-team half "expected contribution" combining attacking output and opponent's defensive vulnerability
+  const buildContrib = (
+    teamRaw?: TeamMatchStats | null,
+    teamAdj?: AdjustedTeamMatchStats | null,
+    oppRaw?: TeamMatchStats | null,
+    oppAdj?: AdjustedTeamMatchStats | null,
+    teamHp?: HalfPatternResponse,
+    oppHp?: HalfPatternResponse,
+  ) => {
+    // Attack scores per half (goals + 0.5 * xG signal)
+    const teamXg1H = teamAdj?.firstHalf?.avgXg ?? teamRaw?.firstHalf?.avgXg ?? null;
+    const teamXg2H = teamAdj?.secondHalf?.avgXg ?? teamRaw?.secondHalf?.avgXg ?? null;
+    const attack1H = avgN(
+      teamAdj?.firstHalf?.avgGoalsScored,
+      teamRaw?.firstHalf?.avgGoalsScored,
+      teamHp?.summary?.averages?.scored1H ?? null,
+      teamXg1H !== null ? teamXg1H * 0.5 : null,
+    );
+    const attack2H = avgN(
+      teamAdj?.secondHalf?.avgGoalsScored,
+      teamRaw?.secondHalf?.avgGoalsScored,
+      teamHp?.summary?.averages?.scored2H ?? null,
+      teamXg2H !== null ? teamXg2H * 0.5 : null,
+    );
+
+    // Opponent defensive vulnerability per half
+    const oppXga1H = oppAdj?.firstHalf?.avgGoalsConceded ?? oppRaw?.firstHalf?.avgGoalsConceded ?? null;
+    const oppXga2H = oppAdj?.secondHalf?.avgGoalsConceded ?? oppRaw?.secondHalf?.avgGoalsConceded ?? null;
+    const concede1H = avgN(
+      oppAdj?.firstHalf?.avgGoalsConceded,
+      oppRaw?.firstHalf?.avgGoalsConceded,
+      oppHp?.summary?.averages?.conceded1H ?? null,
+      oppXga1H,
+    );
+    const concede2H = avgN(
+      oppAdj?.secondHalf?.avgGoalsConceded,
+      oppRaw?.secondHalf?.avgGoalsConceded,
+      oppHp?.summary?.averages?.conceded2H ?? null,
+      oppXga2H,
+    );
+
+    return {
+      h1: (attack1H + concede1H) / 2,
+      h2: (attack2H + concede2H) / 2,
+      attack1H, attack2H, concede1H, concede2H,
+    };
+  };
+
+  const homeC = buildContrib(homeRaw, homeAdj, awayRaw, awayAdj, homeHpD, awayHpD);
+  const awayC = buildContrib(awayRaw, awayAdj, homeRaw, homeAdj, awayHpD, homeHpD);
+
+  const total1H = homeC.h1 + awayC.h1;
+  const total2H = homeC.h2 + awayC.h2;
+  const diff = total2H - total1H;
+  const maxT = Math.max(total1H, total2H);
+  const marginPct = maxT > 0 ? Math.abs(diff) / maxT : 0;
+
+  type Verdict = "first" | "second" | "draw";
+  const verdict: Verdict = marginPct < 0.10 ? "draw" : diff > 0 ? "second" : "first";
+  const confidence: "Low" | "Medium" | "High" =
+    marginPct < 0.10 ? "Low" : marginPct < 0.22 ? "Medium" : "High";
+  const verdictLabel = verdict === "first" ? "First Half" : verdict === "second" ? "Second Half" : "Draw / Even";
+  const verdictColor = verdict === "draw" ? "#eab308" : verdict === "second" ? "#3b82f6" : "#f97316";
+
+  // Build reasoning signals (each says which side it leans + magnitude)
+  type Signal = { text: string; leans: Verdict; weight: number };
+  const signals: Signal[] = [];
+  const signalDelta = (a: number | null | undefined, b: number | null | undefined): { leans: Verdict; weight: number } => {
+    if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b)) return { leans: "draw", weight: 0 };
+    const d = b - a;
+    const m = Math.max(Math.abs(a), Math.abs(b));
+    if (m === 0) return { leans: "draw", weight: 0 };
+    const ratio = Math.abs(d) / m;
+    return { leans: ratio < 0.10 ? "draw" : d > 0 ? "second" : "first", weight: ratio };
+  };
+
+  const push = (text: string, a: number | null | undefined, b: number | null | undefined) => {
+    const { leans, weight } = signalDelta(a, b);
+    if (weight > 0) signals.push({ text, leans, weight });
+  };
+
+  // Goals per half (raw 15)
+  push(
+    `${homeTeamName} Last-15 goals 1H vs 2H: ${fmtNum(homeRaw?.firstHalf?.avgGoalsScored)} → ${fmtNum(homeRaw?.secondHalf?.avgGoalsScored)}`,
+    homeRaw?.firstHalf?.avgGoalsScored, homeRaw?.secondHalf?.avgGoalsScored,
+  );
+  push(
+    `${awayTeamName} Last-15 goals 1H vs 2H: ${fmtNum(awayRaw?.firstHalf?.avgGoalsScored)} → ${fmtNum(awayRaw?.secondHalf?.avgGoalsScored)}`,
+    awayRaw?.firstHalf?.avgGoalsScored, awayRaw?.secondHalf?.avgGoalsScored,
+  );
+
+  // Goals per half adjusted to comparable opponents
+  push(
+    `${homeTeamName} vs comparable opp goals 1H vs 2H: ${fmtNum(homeAdj?.firstHalf?.avgGoalsScored)} → ${fmtNum(homeAdj?.secondHalf?.avgGoalsScored)}`,
+    homeAdj?.firstHalf?.avgGoalsScored, homeAdj?.secondHalf?.avgGoalsScored,
+  );
+  push(
+    `${awayTeamName} vs comparable opp goals 1H vs 2H: ${fmtNum(awayAdj?.firstHalf?.avgGoalsScored)} → ${fmtNum(awayAdj?.secondHalf?.avgGoalsScored)}`,
+    awayAdj?.firstHalf?.avgGoalsScored, awayAdj?.secondHalf?.avgGoalsScored,
+  );
+
+  // xG per half
+  push(
+    `${homeTeamName} xG 1H vs 2H: ${fmtNum(homeRaw?.firstHalf?.avgXg)} → ${fmtNum(homeRaw?.secondHalf?.avgXg)}`,
+    homeRaw?.firstHalf?.avgXg, homeRaw?.secondHalf?.avgXg,
+  );
+  push(
+    `${awayTeamName} xG 1H vs 2H: ${fmtNum(awayRaw?.firstHalf?.avgXg)} → ${fmtNum(awayRaw?.secondHalf?.avgXg)}`,
+    awayRaw?.firstHalf?.avgXg, awayRaw?.secondHalf?.avgXg,
+  );
+
+  // Big chances per half
+  push(
+    `${homeTeamName} big chances 1H vs 2H: ${fmtNum(homeRaw?.firstHalf?.avgBigChances)} → ${fmtNum(homeRaw?.secondHalf?.avgBigChances)}`,
+    homeRaw?.firstHalf?.avgBigChances, homeRaw?.secondHalf?.avgBigChances,
+  );
+  push(
+    `${awayTeamName} big chances 1H vs 2H: ${fmtNum(awayRaw?.firstHalf?.avgBigChances)} → ${fmtNum(awayRaw?.secondHalf?.avgBigChances)}`,
+    awayRaw?.firstHalf?.avgBigChances, awayRaw?.secondHalf?.avgBigChances,
+  );
+
+  // Opp defensive vulnerability — concedes more in which half
+  push(
+    `${awayTeamName} concedes per half: ${fmtNum(awayRaw?.firstHalf?.avgGoalsConceded)} → ${fmtNum(awayRaw?.secondHalf?.avgGoalsConceded)} (defensive lean)`,
+    awayRaw?.firstHalf?.avgGoalsConceded, awayRaw?.secondHalf?.avgGoalsConceded,
+  );
+  push(
+    `${homeTeamName} concedes per half: ${fmtNum(homeRaw?.firstHalf?.avgGoalsConceded)} → ${fmtNum(homeRaw?.secondHalf?.avgGoalsConceded)} (defensive lean)`,
+    homeRaw?.firstHalf?.avgGoalsConceded, homeRaw?.secondHalf?.avgGoalsConceded,
+  );
+
+  // Last 7 half patterns: scored/conceded counts
+  if (homeHpD?.summary) {
+    push(
+      `${homeTeamName} Last 7 — scored 1H ${homeHpD.summary.scored1HCount}/${homeHpD.summary.matchesAnalyzed}, scored 2H ${homeHpD.summary.scored2HCount}/${homeHpD.summary.matchesAnalyzed}`,
+      homeHpD.summary.scored1HCount, homeHpD.summary.scored2HCount,
+    );
+    push(
+      `${homeTeamName} Last 7 — conceded 1H ${homeHpD.summary.conceded1HCount}/${homeHpD.summary.matchesAnalyzed}, conceded 2H ${homeHpD.summary.conceded2HCount}/${homeHpD.summary.matchesAnalyzed}`,
+      homeHpD.summary.conceded1HCount, homeHpD.summary.conceded2HCount,
+    );
+    push(
+      `Last 7 — BTTS 1H ${homeHpD.summary.btts1HCount}, BTTS 2H ${homeHpD.summary.btts2HCount} (${homeTeamName})`,
+      homeHpD.summary.btts1HCount, homeHpD.summary.btts2HCount,
+    );
+  }
+  if (awayHpD?.summary) {
+    push(
+      `${awayTeamName} Last 7 — scored 1H ${awayHpD.summary.scored1HCount}/${awayHpD.summary.matchesAnalyzed}, scored 2H ${awayHpD.summary.scored2HCount}/${awayHpD.summary.matchesAnalyzed}`,
+      awayHpD.summary.scored1HCount, awayHpD.summary.scored2HCount,
+    );
+    push(
+      `${awayTeamName} Last 7 — conceded 1H ${awayHpD.summary.conceded1HCount}/${awayHpD.summary.matchesAnalyzed}, conceded 2H ${awayHpD.summary.conceded2HCount}/${awayHpD.summary.matchesAnalyzed}`,
+      awayHpD.summary.conceded1HCount, awayHpD.summary.conceded2HCount,
+    );
+  }
+
+  // Lean tags from half patterns
+  const leanText = (lean?: HalfPatternResponse["lean"]): { who: Verdict; t: string } | null => {
+    if (!lean) return null;
+    if (lean.scoringLean === "Strong starter") return { who: "first", t: `lean: Strong starter (${Math.round(lean.teamGoalShare1H * 100)}% goals 1H)` };
+    if (lean.scoringLean === "Strong finisher") return { who: "second", t: `lean: Strong finisher (${Math.round(lean.teamGoalShare2H * 100)}% goals 2H)` };
+    return { who: "draw", t: `lean: Balanced scorer` };
+  };
+  const homeLean = leanText(homeHpD?.lean);
+  const awayLean = leanText(awayHpD?.lean);
+  if (homeLean && homeLean.who !== "draw") signals.push({ text: `${homeTeamName} ${homeLean.t}`, leans: homeLean.who, weight: 0.5 });
+  if (awayLean && awayLean.who !== "draw") signals.push({ text: `${awayTeamName} ${awayLean.t}`, leans: awayLean.who, weight: 0.5 });
+
+  signals.sort((a, b) => b.weight - a.weight);
+  const topSignals = signals.slice(0, 7);
+
+  // Tally signal alignment
+  const tally = signals.reduce(
+    (acc, s) => {
+      if (s.leans === "first") acc.first += s.weight;
+      else if (s.leans === "second") acc.second += s.weight;
+      else acc.draw += s.weight;
+      return acc;
+    },
+    { first: 0, second: 0, draw: 0 },
+  );
+
+  const fmt2 = (v: number) => (Math.round(v * 100) / 100).toFixed(2);
+  const verdictBadgeColor = (v: Verdict) =>
+    v === "first" ? "#f97316" : v === "second" ? "#3b82f6" : "#eab308";
+
+  return (
+    <View style={styles.phaseCard}>
+      <Text style={styles.cardLabel}>Highest scoring half · prediction</Text>
+
+      <View style={[styles.verdictBox, { borderColor: verdictColor + "55", backgroundColor: verdictColor + "18" }]}>
+        <View style={styles.verdictHead}>
+          <Text style={styles.verdictKicker}>Predicted highest-scoring half</Text>
+          <Text style={[styles.verdictTag, { color: verdictColor }]}>{confidence} conf.</Text>
+        </View>
+        <Text style={[styles.verdictTitle, { color: verdictColor }]}>{verdictLabel}</Text>
+        <Text style={styles.verdictSub}>
+          Expected goals — 1H {fmt2(total1H)} · 2H {fmt2(total2H)} · margin {(marginPct * 100).toFixed(0)}%
+        </Text>
+        <Text style={styles.verdictSub}>
+          Signal tally — 1H {fmt2(tally.first)} · 2H {fmt2(tally.second)} · even {fmt2(tally.draw)}
+        </Text>
+      </View>
+
+      <View style={styles.statsHeaderRow}>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.homeKit }]} numberOfLines={1}>{homeTeamName}</Text>
+        <Text style={styles.statsHeaderLabel}>Per-team expected</Text>
+        <Text style={[styles.statsHeaderTeam, { color: Colors.dark.awayKit }]} numberOfLines={1}>{awayTeamName}</Text>
+      </View>
+      <View style={styles.statsRow}>
+        <Text style={[styles.statsValue, { color: Colors.dark.text }]}>{fmt2(homeC.h1)}</Text>
+        <Text style={styles.statsLabel}>1H xGoals (attack ⊕ opp leak)</Text>
+        <Text style={[styles.statsValue, { color: Colors.dark.text, textAlign: "right" }]}>{fmt2(awayC.h1)}</Text>
+      </View>
+      <View style={styles.statsRow}>
+        <Text style={[styles.statsValue, { color: Colors.dark.text }]}>{fmt2(homeC.h2)}</Text>
+        <Text style={styles.statsLabel}>2H xGoals (attack ⊕ opp leak)</Text>
+        <Text style={[styles.statsValue, { color: Colors.dark.text, textAlign: "right" }]}>{fmt2(awayC.h2)}</Text>
+      </View>
+
+      <Text style={[styles.statsSectionLabel, { marginTop: 10 }]}>Top reasoning signals</Text>
+      {topSignals.length === 0 ? (
+        <Text style={styles.statsNoData}>Not enough data to derive signals.</Text>
+      ) : topSignals.map((s, i) => (
+        <View key={i} style={styles.signalRow}>
+          <View style={[styles.signalDot, { backgroundColor: verdictBadgeColor(s.leans) }]} />
+          <Text style={styles.signalText}>{s.text}</Text>
+          <Text style={[styles.signalLeans, { color: verdictBadgeColor(s.leans) }]}>
+            {s.leans === "first" ? "1H" : s.leans === "second" ? "2H" : "≈"}
+          </Text>
+        </View>
+      ))}
+
+      <Text style={styles.modeCaption}>
+        Method: blends Last 15 raw averages, opponent-quality-weighted Last 15, Last 7 half patterns and xG/big-chance half splits. Opponent's defensive vulnerability per half is mixed in. Margin under 10% returns Draw.
+      </Text>
+    </View>
+  );
+}
+
 function HalfPatternsCard({
   eventId,
   homeTeamId,
@@ -2711,6 +3000,15 @@ function StadiumSimulationTab({
         awayTeamId={awayTeamId}
         homeTeamName={homeTeamName}
         awayTeamName={awayTeamName}
+      />
+
+      <HighestScoringHalfCard
+        eventId={eventId}
+        homeTeamId={homeTeamId}
+        awayTeamId={awayTeamId}
+        homeTeamName={homeTeamName}
+        awayTeamName={awayTeamName}
+        simulationMetrics={simulationMetrics}
       />
 
       <CausalAnalysisCard
@@ -3700,6 +3998,68 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: "rgba(255,255,255,0.08)",
     marginVertical: 12,
+  },
+  verdictBox: {
+    marginTop: 8,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  verdictHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  verdictKicker: {
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+    color: Colors.dark.textSecondary,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  verdictTag: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  verdictTitle: {
+    fontSize: 22,
+    fontFamily: "Inter_700Bold",
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  verdictSub: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.textSecondary,
+    marginTop: 2,
+  },
+  signalRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    paddingVertical: 6,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  signalDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginTop: 6,
+  },
+  signalText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    color: Colors.dark.text,
+    lineHeight: 17,
+  },
+  signalLeans: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    minWidth: 28,
+    textAlign: "right",
   },
   statsNoData: {
     fontSize: 12,
