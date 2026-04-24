@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
 import db from "./db";
 import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
+import { proxyFetch } from "./proxyFetch";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -1760,7 +1761,7 @@ const SOFASCORE_HEADERS: Record<string, string> = {
 
 async function fetchSofaScore(endpoint: string) {
   const url = `${SOFASCORE_API}${endpoint}`;
-  const res = await fetch(url, { headers: SOFASCORE_HEADERS });
+  const res = await proxyFetch(url, { headers: SOFASCORE_HEADERS });
   if (!res.ok) {
     throw new Error(`SofaScore API error: ${res.status}`);
   }
@@ -1808,7 +1809,7 @@ function selectLastPlayedTeamMatches(events: any[], teamId: number, currentStart
 
 async function proxyImage(imageUrl: string, res: Response) {
   try {
-    const response = await fetch(imageUrl, { headers: SOFASCORE_HEADERS });
+    const response = await proxyFetch(imageUrl, { headers: SOFASCORE_HEADERS });
     if (!response.ok) {
       return res.status(response.status).send("Image not found");
     }
