@@ -271,6 +271,66 @@ col("away_ssbi_lbr", "REAL");
 col("home_ssbi_ddi", "REAL");
 col("away_ssbi_ddi", "REAL");
 
+// ── Match-day context features (computed via halfContext.ts) ─────────────
+// These are populated during /api/database/process-date so per-outcome
+// models can train on rich pre-match context (knockout stage, motivation,
+// fatigue, sub patterns, style clash, odds, stage modifier).
+col("ctx_is_knockout",          "INTEGER");
+col("ctx_knockout_stage",       "TEXT");
+col("ctx_is_second_leg",        "INTEGER");
+col("ctx_agg_lead_goals",       "INTEGER");
+col("ctx_trailing_needs_goals", "INTEGER");
+col("ctx_home_motivation",      "REAL");
+col("ctx_away_motivation",      "REAL");
+col("ctx_motivation_asymmetry", "REAL");
+col("ctx_home_pressure_status", "TEXT");
+col("ctx_away_pressure_status", "TEXT");
+col("ctx_home_fatigue_index",   "REAL");
+col("ctx_away_fatigue_index",   "REAL");
+col("ctx_fatigue_asymmetry",    "REAL");
+col("ctx_home_avg_first_sub",   "REAL");
+col("ctx_away_avg_first_sub",   "REAL");
+col("ctx_home_late_subs_rate",  "REAL");
+col("ctx_away_late_subs_rate",  "REAL");
+col("ctx_home_conservative_coach", "INTEGER");
+col("ctx_away_conservative_coach", "INTEGER");
+col("ctx_style_clash_lean",     "TEXT");      // first | second | draw | null
+col("ctx_style_clash_weight",   "REAL");
+col("ctx_odds_home_win",        "REAL");
+col("ctx_odds_draw",            "REAL");
+col("ctx_odds_away_win",        "REAL");
+col("ctx_odds_favorite",        "TEXT");      // home | away | even
+col("ctx_odds_gap",             "REAL");
+col("ctx_stage_label",          "TEXT");
+col("ctx_stage_modifier",       "REAL");
+col("ctx_signal_count",         "INTEGER");
+col("ctx_signal_first_weight",  "REAL");      // sum of weights for "first" leans
+col("ctx_signal_second_weight", "REAL");
+col("ctx_signal_draw_weight",   "REAL");
+
+// Score bucket classification (one of the 15 outcome groups)
+col("score_bucket",             "TEXT");      // e.g. "0-0", "1-0/0-1", "1-1"
+col("score_sum",                "INTEGER");
+col("score_abs_diff",           "INTEGER");
+
+// ── Per-outcome model storage ──────────────────────────────────────────────
+// Each row = one trained model for one of the 15 score buckets.
+// Weights stored as JSON: { sum: number[], diff: number[], featureNames: string[],
+//                           biasSum, biasDiff, normMean, normStd, accuracy, ... }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS engine_outcome_models (
+    bucket           TEXT PRIMARY KEY,
+    weights          TEXT NOT NULL,
+    sample_count     INTEGER NOT NULL,
+    train_hits       INTEGER NOT NULL,
+    false_positives  INTEGER NOT NULL,
+    train_accuracy   REAL NOT NULL,
+    fp_rate          REAL NOT NULL,
+    formula          TEXT NOT NULL,
+    trained_at       TEXT NOT NULL
+  )
+`);
+
 // ── Startup: prune stored matches that are missing the key half-period stats ─
 // Matches missing 1H/2H possession or shots will always show "—" in the UI
 // and are useless for half-time training. Remove them once at startup so the

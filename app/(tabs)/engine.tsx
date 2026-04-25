@@ -30,6 +30,38 @@ interface TrainingProgress {
   error: string | null;
 }
 
+interface OutcomeBucket {
+  id: string;
+  label: string;
+  scores: [number, number][];
+  sum: number;
+  absDiff: number;
+  sampleCount: number;
+  trained: boolean;
+  trainAccuracy: number | null;
+  fpRate: number | null;
+  trainedAt: string | null;
+}
+
+interface OutcomeTrainProgress {
+  running: boolean;
+  bucket: string | null;
+  progress: number;
+  message: string;
+  error: string | null;
+}
+
+interface OutcomeModel {
+  bucket: string;
+  sampleCount: number;
+  trainHits: number;
+  falsePositives: number;
+  trainAccuracy: number;
+  fpRate: number;
+  formula: string;
+  trainedAt: string;
+}
+
 function MetricCard({ label, value, unit = "" }: { label: string; value: string | number; unit?: string }) {
   return (
     <View style={styles.metricCard}>
@@ -75,6 +107,8 @@ export default function EngineScreen() {
   const queryClient = useQueryClient();
   const [polling, setPolling] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
+  const [outcomePolling, setOutcomePolling] = useState(false);
   const webTop = Platform.OS === "web" ? 67 : 0;
   const webBottom = Platform.OS === "web" ? 84 : 0;
 
@@ -134,6 +168,71 @@ export default function EngineScreen() {
   const handleDeleteModels = useCallback(() => {
     setConfirmDelete(true);
   }, []);
+
+  // ── Per-score-outcome models ──────────────────────────────────────────
+  const { data: outcomeBuckets, refetch: refetchBuckets } = useQuery<{ buckets: OutcomeBucket[] }>({
+    queryKey: ["/api/engine/outcome-buckets"],
+  });
+
+  const { data: outcomeProgress } = useQuery<OutcomeTrainProgress>({
+    queryKey: ["/api/engine/outcome-train-progress"],
+    refetchInterval: outcomePolling ? 1500 : false,
+    enabled: outcomePolling,
+  });
+
+  const { data: selectedModel, refetch: refetchSelectedModel } = useQuery<OutcomeModel>({
+    queryKey: ["/api/engine/outcome-model", selectedBucket],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/engine/outcome-model/${encodeURIComponent(selectedBucket!)}`);
+      return res.json();
+    },
+    enabled: !!selectedBucket,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (outcomeProgress !== undefined && outcomeProgress.running === false && outcomePolling) {
+      setOutcomePolling(false);
+      refetchBuckets();
+      refetchSelectedModel();
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/outcome-buckets"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/outcome-model", selectedBucket] });
+    }
+  }, [outcomeProgress, outcomePolling]);
+
+  const trainOutcomeMutation = useMutation({
+    mutationFn: async (bucket: string) => {
+      const res = await apiRequest("POST", "/api/engine/train-outcome", { bucket });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["/api/engine/outcome-train-progress"] });
+      setOutcomePolling(true);
+    },
+    onError: (err: Error) => Alert.alert("Training Error", err.message, [{ text: "OK" }]),
+  });
+
+  const deleteOutcomeMutation = useMutation({
+    mutationFn: async (bucket: string) => {
+      const res = await apiRequest("DELETE", `/api/engine/outcome-model/${encodeURIComponent(bucket)}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchBuckets();
+      queryClient.removeQueries({ queryKey: ["/api/engine/outcome-model", selectedBucket] });
+    },
+    onError: (err: Error) => Alert.alert("Error", err.message, [{ text: "OK" }]),
+  });
+
+  const handleTrainOutcome = useCallback(() => {
+    if (!selectedBucket) {
+      Alert.alert("Select a bucket", "Pick a score outcome first.", [{ text: "OK" }]);
+      return;
+    }
+    trainOutcomeMutation.mutate(selectedBucket);
+  }, [selectedBucket, trainOutcomeMutation]);
+
+  const isOutcomeTraining = outcomePolling && outcomeProgress?.running;
 
   const isTraining = polling && progress?.running;
   const trainingProgress = progress?.progress ?? 0;
@@ -268,6 +367,119 @@ export default function EngineScreen() {
           </View>
         </View>
       )}
+
+      {/* ── Per-Score-Outcome Models ────────────────────────────────── */}
+      <View style={styles.outcomeSection}>
+        <Text style={styles.sectionTitle}>Per-Score-Outcome Models</Text>
+        <Text style={styles.sectionSubtitle}>
+          Pick a final-score bucket and train a unified linear formula that lands every match in that bucket on the target score, while keeping matches from other buckets away from it.
+        </Text>
+
+        <View style={styles.bucketGrid}>
+          {(outcomeBuckets?.buckets ?? []).map((b) => {
+            const active = selectedBucket === b.id;
+            return (
+              <TouchableOpacity
+                key={b.id}
+                onPress={() => setSelectedBucket(b.id)}
+                style={[styles.bucketChip, active && styles.bucketChipActive]}
+                testID={`bucket-${b.id}`}
+              >
+                <Text style={[styles.bucketChipLabel, active && styles.bucketChipLabelActive]}>{b.label}</Text>
+                <Text style={[styles.bucketChipCount, active && styles.bucketChipCountActive]}>
+                  n={b.sampleCount}
+                </Text>
+                {b.trained && (
+                  <View style={styles.bucketChipDot}>
+                    <Ionicons name="checkmark-circle" size={12} color={active ? "#fff" : Colors.dark.accent} />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+          {!outcomeBuckets && (
+            <Text style={styles.emptyHint}>Loading buckets…</Text>
+          )}
+        </View>
+
+        <View style={styles.outcomeActions}>
+          <TouchableOpacity
+            style={[
+              styles.trainOutcomeBtn,
+              (!selectedBucket || isOutcomeTraining) && styles.trainOutcomeBtnDisabled,
+            ]}
+            onPress={handleTrainOutcome}
+            disabled={!selectedBucket || !!isOutcomeTraining}
+            testID="train-outcome-btn"
+          >
+            {isOutcomeTraining ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <>
+                <Ionicons name="flash" size={16} color="#fff" />
+                <Text style={styles.trainOutcomeBtnText}>
+                  {selectedBucket ? `Train "${selectedBucket}"` : "Select a bucket"}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {selectedBucket && selectedModel && !isOutcomeTraining && (
+            <TouchableOpacity
+              style={styles.deleteOutcomeBtn}
+              onPress={() => deleteOutcomeMutation.mutate(selectedBucket)}
+              testID="delete-outcome-btn"
+            >
+              <Ionicons name="trash-outline" size={16} color="#ef4444" />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {isOutcomeTraining && (
+          <View style={styles.outcomeProgress}>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, { width: `${outcomeProgress?.progress ?? 0}%` }]} />
+            </View>
+            <Text style={styles.outcomeProgressMsg}>{outcomeProgress?.message ?? "Working…"}</Text>
+          </View>
+        )}
+
+        {outcomeProgress?.error && !isOutcomeTraining && (
+          <Text style={styles.outcomeError}>Error: {outcomeProgress.error}</Text>
+        )}
+
+        {selectedModel && !isOutcomeTraining && (
+          <View style={styles.outcomeResultCard}>
+            <View style={styles.outcomeResultHeader}>
+              <Text style={styles.outcomeResultTitle}>Bucket "{selectedModel.bucket}"</Text>
+              <Text style={styles.outcomeResultDate}>{formatDate(selectedModel.trainedAt)}</Text>
+            </View>
+            <View style={styles.outcomeMetricsRow}>
+              <View style={styles.outcomeMetric}>
+                <Text style={styles.outcomeMetricValue}>{selectedModel.sampleCount}</Text>
+                <Text style={styles.outcomeMetricLabel}>positives</Text>
+              </View>
+              <View style={styles.outcomeMetric}>
+                <Text style={[styles.outcomeMetricValue, { color: "#22c55e" }]}>
+                  {(selectedModel.trainAccuracy * 100).toFixed(1)}%
+                </Text>
+                <Text style={styles.outcomeMetricLabel}>train hit-rate</Text>
+              </View>
+              <View style={styles.outcomeMetric}>
+                <Text style={[styles.outcomeMetricValue, { color: "#f59e0b" }]}>
+                  {(selectedModel.fpRate * 100).toFixed(1)}%
+                </Text>
+                <Text style={styles.outcomeMetricLabel}>false-positive</Text>
+              </View>
+            </View>
+            <View style={styles.formulaBox}>
+              <Text style={styles.formulaText} selectable>
+                {selectedModel.formula}
+              </Text>
+            </View>
+          </View>
+        )}
+      </View>
 
       <View style={styles.architectureSection}>
         <Text style={styles.sectionTitle}>Engine Architecture</Text>
@@ -407,4 +619,60 @@ const styles = StyleSheet.create({
   outputDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: Colors.dark.accent, marginTop: 5 },
   outputLabel: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: Colors.dark.text },
   outputDesc: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, lineHeight: 16 },
+
+  // Per-score-outcome models
+  outcomeSection: { marginBottom: 24 },
+  bucketGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
+  bucketChip: {
+    backgroundColor: Colors.dark.surface, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: Colors.dark.border, alignItems: "center", minWidth: 80, position: "relative",
+  },
+  bucketChipActive: { backgroundColor: Colors.dark.accent, borderColor: Colors.dark.accent },
+  bucketChipLabel: { fontSize: 13, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  bucketChipLabelActive: { color: "#fff" },
+  bucketChipCount: { fontSize: 10, fontFamily: "Inter_500Medium", color: Colors.dark.textSecondary, marginTop: 2 },
+  bucketChipCountActive: { color: "rgba(255,255,255,0.85)" },
+  bucketChipDot: { position: "absolute", top: 4, right: 4 },
+  emptyHint: { fontSize: 12, color: Colors.dark.textSecondary, fontFamily: "Inter_400Regular" },
+  outcomeActions: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
+  trainOutcomeBtn: {
+    flex: 1, backgroundColor: Colors.dark.accent, borderRadius: 10,
+    paddingVertical: 12, paddingHorizontal: 14,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+  },
+  trainOutcomeBtnDisabled: { opacity: 0.5 },
+  trainOutcomeBtnText: { color: "#fff", fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  deleteOutcomeBtn: {
+    backgroundColor: Colors.dark.surface, borderRadius: 10,
+    paddingVertical: 12, paddingHorizontal: 14,
+    borderWidth: 1, borderColor: Colors.dark.border,
+  },
+  outcomeProgress: { marginBottom: 12 },
+  progressBarBg: {
+    height: 6, borderRadius: 3, backgroundColor: Colors.dark.border, overflow: "hidden", marginBottom: 6,
+  },
+  outcomeProgressMsg: { fontSize: 11, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  outcomeError: {
+    fontSize: 12, fontFamily: "Inter_500Medium", color: "#ef4444",
+    backgroundColor: "rgba(239,68,68,0.1)", borderRadius: 8, padding: 10, marginBottom: 12,
+  },
+  outcomeResultCard: {
+    backgroundColor: Colors.dark.surface, borderRadius: 12, padding: 14,
+    borderWidth: 1, borderColor: Colors.dark.border,
+  },
+  outcomeResultHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  outcomeResultTitle: { fontSize: 14, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  outcomeResultDate: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary },
+  outcomeMetricsRow: { flexDirection: "row", gap: 12, marginBottom: 12 },
+  outcomeMetric: { flex: 1, backgroundColor: "#1e293b", borderRadius: 8, padding: 10, alignItems: "center" },
+  outcomeMetricValue: { fontSize: 18, fontFamily: "Inter_700Bold", color: Colors.dark.text },
+  outcomeMetricLabel: { fontSize: 10, fontFamily: "Inter_400Regular", color: Colors.dark.textSecondary, marginTop: 2 },
+  formulaBox: {
+    backgroundColor: "#0f172a", borderRadius: 8, padding: 12,
+    borderWidth: 1, borderColor: "#1e293b",
+  },
+  formulaText: {
+    fontSize: 11, fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    color: "#cbd5e1", lineHeight: 18,
+  },
 });

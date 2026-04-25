@@ -3,8 +3,14 @@ import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
 import db from "./db";
 import engine, { extractFeatures, FEATURE_NAMES } from "./xgEngine";
-import { proxyFetch } from "./proxyFetch";
 import { computeHalfContext } from "./halfContext";
+import {
+  SCORE_BUCKETS,
+  classifyBucket,
+  trainBucket,
+  type TrainedOutcomeModel,
+} from "./scoreOutcomeTrainer";
+import { proxyFetch } from "./proxyFetch";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -4846,6 +4852,142 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
   });
 
   // ─── xG Engine: predict for stored match ──────────────────────────────────
+  // ─── Per-Score-Outcome trainer ────────────────────────────────────────────
+  // The outcome trainer fits a unified linear formula per score bucket
+  // (0-0, 1-0/0-1, ..., 4-4). One trained model per bucket is stored in the
+  // engine_outcome_models table. See server/scoreOutcomeTrainer.ts.
+
+  type OutcomeTrainState = {
+    running: boolean;
+    bucket: string | null;
+    progress: number;
+    message: string;
+    error: string | null;
+    result: TrainedOutcomeModel | null;
+  };
+  const outcomeTrainState: OutcomeTrainState = {
+    running: false,
+    bucket: null,
+    progress: 0,
+    message: "",
+    error: null,
+    result: null,
+  };
+
+  app.get("/api/engine/outcome-buckets", (_req: Request, res: Response) => {
+    // Return all buckets with sample counts and trained-model summary
+    const trained: any[] = db.prepare(`
+      SELECT bucket, sample_count, train_hits, false_positives,
+             train_accuracy, fp_rate, trained_at
+      FROM engine_outcome_models
+    `).all();
+    const trainedMap = new Map<string, any>(trained.map((t) => [t.bucket, t]));
+    const buckets = SCORE_BUCKETS.map((b) => {
+      // Count matches in DB matching this bucket
+      let count = 0;
+      for (const [sh, sa] of b.scores) {
+        const r: any = db.prepare(
+          `SELECT COUNT(*) c FROM match_simulations
+           WHERE home_goals = ? AND away_goals = ?
+             AND home_avg_xg IS NOT NULL AND away_avg_xg IS NOT NULL`
+        ).get(sh, sa);
+        count += r?.c || 0;
+      }
+      const t = trainedMap.get(b.id);
+      return {
+        id: b.id,
+        label: b.label,
+        scores: b.scores,
+        sum: b.sum,
+        absDiff: b.absDiff,
+        sampleCount: count,
+        trained: !!t,
+        trainAccuracy: t?.train_accuracy ?? null,
+        fpRate: t?.fp_rate ?? null,
+        trainedAt: t?.trained_at ?? null,
+      };
+    });
+    res.json({ buckets });
+  });
+
+  app.get("/api/engine/outcome-train-progress", (_req: Request, res: Response) => {
+    res.json({
+      running: outcomeTrainState.running,
+      bucket: outcomeTrainState.bucket,
+      progress: outcomeTrainState.progress,
+      message: outcomeTrainState.message,
+      error: outcomeTrainState.error,
+    });
+  });
+
+  app.post("/api/engine/train-outcome", async (req: Request, res: Response) => {
+    const { bucket } = req.body as { bucket?: string };
+    if (!bucket) return res.status(400).json({ error: "bucket required" });
+    const found = SCORE_BUCKETS.find((b) => b.id === bucket);
+    if (!found) return res.status(400).json({ error: `unknown bucket "${bucket}". Valid: ${SCORE_BUCKETS.map(b => b.id).join(", ")}` });
+    if (outcomeTrainState.running) {
+      return res.status(409).json({ error: `Already training bucket "${outcomeTrainState.bucket}"` });
+    }
+
+    outcomeTrainState.running = true;
+    outcomeTrainState.bucket = bucket;
+    outcomeTrainState.progress = 0;
+    outcomeTrainState.message = "Starting...";
+    outcomeTrainState.error = null;
+    outcomeTrainState.result = null;
+
+    // Fire-and-forget — client polls /outcome-train-progress, then GETs the model
+    (async () => {
+      try {
+        const trained = await trainBucket({
+          bucketId: bucket,
+          onProgress: (pct, msg) => {
+            outcomeTrainState.progress = pct;
+            outcomeTrainState.message = msg;
+          },
+        });
+        outcomeTrainState.result = trained;
+        outcomeTrainState.message = `Done. Train accuracy ${(trained.trainAccuracy * 100).toFixed(1)}%, FP ${(trained.fpRate * 100).toFixed(1)}%.`;
+      } catch (err: any) {
+        outcomeTrainState.error = err.message || String(err);
+        outcomeTrainState.message = `Failed: ${outcomeTrainState.error}`;
+      } finally {
+        outcomeTrainState.running = false;
+        outcomeTrainState.progress = 100;
+      }
+    })();
+
+    res.json({ started: true, bucket });
+  });
+
+  app.get("/api/engine/outcome-model/:bucket", (req: Request, res: Response) => {
+    const bucket = req.params.bucket;
+    const row: any = db.prepare(`
+      SELECT bucket, weights, sample_count, train_hits, false_positives,
+             train_accuracy, fp_rate, formula, trained_at
+      FROM engine_outcome_models WHERE bucket = ?
+    `).get(bucket);
+    if (!row) return res.status(404).json({ error: "Model not trained yet" });
+    let weights: any = {};
+    try { weights = JSON.parse(row.weights); } catch {}
+    res.json({
+      bucket: row.bucket,
+      sampleCount: row.sample_count,
+      trainHits: row.train_hits,
+      falsePositives: row.false_positives,
+      trainAccuracy: row.train_accuracy,
+      fpRate: row.fp_rate,
+      formula: row.formula,
+      trainedAt: row.trained_at,
+      weights,
+    });
+  });
+
+  app.delete("/api/engine/outcome-model/:bucket", (req: Request, res: Response) => {
+    const r = db.prepare("DELETE FROM engine_outcome_models WHERE bucket = ?").run(req.params.bucket);
+    res.json({ deleted: r.changes });
+  });
+
   app.get("/api/engine/predict/:eventId", async (req: Request, res: Response) => {
     try {
       // Fail fast: no point fetching SofaScore data if there's no trained model
@@ -5422,7 +5564,86 @@ Format with clear markdown headings (### for sections). Keep it punchy but thoro
             const injuryNote = (hKeyMissing > 0 || aKeyMissing > 0)
               ? ` | 🚑 Key absences: H${hKeyMissing} A${aKeyMissing}`
               : "";
-            job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} (${tournament})${injuryNote}`);
+
+            // ── Score-bucket classification + match-day context features ───
+            // After the row is stored, compute pre-match context (motivation,
+            // fatigue, sub patterns, style clash, odds, stage) and update the
+            // row. This data feeds the per-outcome trainer in the Engine tab.
+            const bucketId = classifyBucket(hGoals, aGoals);
+            const scoreSum = hGoals + aGoals;
+            const scoreAbsDiff = Math.abs(hGoals - aGoals);
+            try {
+              db.prepare(`
+                UPDATE match_simulations
+                SET score_bucket = ?, score_sum = ?, score_abs_diff = ?
+                WHERE event_id = ?
+              `).run(bucketId, scoreSum, scoreAbsDiff, eventId);
+            } catch {}
+
+            try {
+              const ctx = await computeHalfContext(eventId);
+              const c = ctx.context;
+              const sigFirst = ctx.signals.filter((s: any) => s.leans === "first").reduce((acc: number, s: any) => acc + s.weight, 0);
+              const sigSecond = ctx.signals.filter((s: any) => s.leans === "second").reduce((acc: number, s: any) => acc + s.weight, 0);
+              const sigDraw = ctx.signals.filter((s: any) => s.leans === "draw").reduce((acc: number, s: any) => acc + s.weight, 0);
+              db.prepare(`
+                UPDATE match_simulations SET
+                  ctx_is_knockout = ?, ctx_knockout_stage = ?, ctx_is_second_leg = ?,
+                  ctx_agg_lead_goals = ?, ctx_trailing_needs_goals = ?,
+                  ctx_home_motivation = ?, ctx_away_motivation = ?, ctx_motivation_asymmetry = ?,
+                  ctx_home_pressure_status = ?, ctx_away_pressure_status = ?,
+                  ctx_home_fatigue_index = ?, ctx_away_fatigue_index = ?, ctx_fatigue_asymmetry = ?,
+                  ctx_home_avg_first_sub = ?, ctx_away_avg_first_sub = ?,
+                  ctx_home_late_subs_rate = ?, ctx_away_late_subs_rate = ?,
+                  ctx_home_conservative_coach = ?, ctx_away_conservative_coach = ?,
+                  ctx_style_clash_lean = ?, ctx_style_clash_weight = ?,
+                  ctx_odds_home_win = ?, ctx_odds_draw = ?, ctx_odds_away_win = ?,
+                  ctx_odds_favorite = ?, ctx_odds_gap = ?,
+                  ctx_stage_label = ?, ctx_stage_modifier = ?,
+                  ctx_signal_count = ?, ctx_signal_first_weight = ?,
+                  ctx_signal_second_weight = ?, ctx_signal_draw_weight = ?
+                WHERE event_id = ?
+              `).run(
+                c.knockout?.isKnockout ? 1 : 0,
+                c.knockout?.stage ?? null,
+                c.knockout?.isSecondLeg ? 1 : 0,
+                c.knockout?.aggregateLead ?? null,
+                c.knockout?.trailingNeedsGoals ?? null,
+                c.pressure?.home?.motivation ?? null,
+                c.pressure?.away?.motivation ?? null,
+                c.pressure?.asymmetry ?? null,
+                c.pressure?.home?.status ?? null,
+                c.pressure?.away?.status ?? null,
+                c.fatigue?.home?.fatigueIndex ?? null,
+                c.fatigue?.away?.fatigueIndex ?? null,
+                c.fatigue?.asymmetry ?? null,
+                c.subPatterns?.home?.avgFirstSubMinute ?? null,
+                c.subPatterns?.away?.avgFirstSubMinute ?? null,
+                c.subPatterns?.home?.lateSubsRate ?? null,
+                c.subPatterns?.away?.lateSubsRate ?? null,
+                c.subPatterns?.home?.conservative ? 1 : 0,
+                c.subPatterns?.away?.conservative ? 1 : 0,
+                c.styleClash?.lean ?? null,
+                c.styleClash ? 0.5 : 0,
+                c.odds?.homeWin ?? null,
+                c.odds?.draw ?? null,
+                c.odds?.awayWin ?? null,
+                c.odds?.favorite ?? null,
+                c.odds?.gap ?? null,
+                c.stage?.label ?? null,
+                c.stage?.modifier ?? null,
+                ctx.signals.length,
+                sigFirst,
+                sigSecond,
+                sigDraw,
+                eventId,
+              );
+            } catch (ctxErr: any) {
+              // Context is optional — log but don't fail the upload
+              job.log.push(`   ↳ ctx skipped (${ctxErr.message?.slice(0, 60) || "error"})`);
+            }
+
+            job.log.push(`✅ Stored: ${homeTeamName} ${hGoals}-${aGoals} ${awayTeamName} [${bucketId ?? "out-of-range"}] (${tournament})${injuryNote}`);
           } catch (err: any) {
             job.failed++;
             job.log.push(`❌ Failed: ${homeTeamName} vs ${awayTeamName} — ${err.message}`);
